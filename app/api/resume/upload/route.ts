@@ -1,11 +1,30 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { createResume, getResumeByUser } from "@/lib/db/resumes";
-import { extractSkillsFromResume } from "@/lib/openai";
 import { getLatestAssessmentByUser } from "@/lib/db/assessments";
 import { getActiveInternships } from "@/lib/db/internships";
 import { upsertRecommendation } from "@/lib/db/recommendations";
 import { rankInternships } from "@/lib/recommendation";
+import { calculateATSScore, ATSInput } from "@/lib/ats";
+
+// OFFLINE: Resume parsing uses local ai-service (gemma4:e4b via Ollama).
+// No xAI/Grok calls anywhere in this file.
+// Detect if running inside Docker (presence of /.dockerenv)
+let AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
+
+function getResolvedAiServiceUrl() {
+  try {
+    const fs = require('fs');
+    const isDocker = fs.existsSync('/.dockerenv');
+    let url = process.env.AI_SERVICE_URL || "http://localhost:8000";
+    if (!isDocker && url.includes("ai-service")) {
+      url = url.replace("ai-service", "127.0.0.1");
+    }
+    return url;
+  } catch (e) {
+    return AI_SERVICE_URL;
+  }
+}
 
 async function extractTextFromFile(buffer: Buffer, mimeType: string): Promise<string> {
   if (mimeType === "application/pdf" || mimeType.includes("pdf")) {
@@ -76,7 +95,7 @@ export async function POST(request: NextRequest) {
     const bytes = await file.arrayBuffer();
     const buffer = Buffer.from(bytes);
 
-    // Upload to Supabase Storage
+    let fileUrl = "";
     const sb = (await import("@/lib/supabase")).getSupabase();
     const safeFileName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_");
     const filePath = `${userId}/${Date.now()}-${safeFileName}`;
@@ -89,19 +108,35 @@ export async function POST(request: NextRequest) {
       });
 
     if (uploadError) {
-      console.error("Supabase storage error:", uploadError);
-      throw new Error("Failed to upload resume to storage: " + uploadError.message);
+      console.error("Supabase storage error (signature verification failed or bucket missing):", uploadError);
+      console.warn("Falling back to local disk storage for offline mode...");
+      
+      try {
+        const fs = require('fs');
+        const path = await import("path");
+        const uploadDir = path.join(process.cwd(), "public", "uploads", userId);
+        fs.mkdirSync(uploadDir, { recursive: true });
+        fs.writeFileSync(path.join(uploadDir, safeFileName), buffer);
+        fileUrl = `/uploads/${userId}/${safeFileName}`;
+        console.log(`Saved file locally to ${fileUrl}`);
+      } catch (localErr: any) {
+        console.error("Local storage fallback also failed:", localErr);
+        return NextResponse.json(
+          { success: false, message: "Storage upload failed", reason: uploadError.message, stack: localErr.stack },
+          { status: 500 }
+        );
+      }
+    } else {
+      const { data: urlData } = sb.storage.from("resumes").getPublicUrl(filePath);
+      fileUrl = urlData.publicUrl;
     }
-
-    const { data: urlData } = sb.storage.from("resumes").getPublicUrl(filePath);
-    const fileUrl = urlData.publicUrl;
 
     // Extract text from resume
     let rawText = "";
     try {
       rawText = await extractTextFromFile(buffer, file.type || "application/pdf");
       console.log(`Extracted ${rawText.length} chars from resume`);
-    } catch (err) {
+    } catch (err: any) {
       console.error("Text extraction error:", err);
       rawText = "";
     }
@@ -118,33 +153,155 @@ export async function POST(request: NextRequest) {
       `;
     }
 
-    // AI resume review — always succeeds (falls back to local rule-based analysis if API fails)
-    const { reviewResumeWithGrok } = await import("@/lib/openai");
-    const review = await reviewResumeWithGrok(rawText);
-    console.log("[Resume] Skills extracted:", review.extractedSkills.allSkills.length, "| ATS Score:", review.atsScore);
+    // ── Parse resume with local gemma4:e4b via ai-service ───────────────────
+    let parsedResume: any = null;
+    try {
+      const resolvedAiUrl = getResolvedAiServiceUrl();
+      const parseResp = await fetch(`${resolvedAiUrl}/resume/parse`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: rawText.substring(0, 6000), user_id: userId }),
+        signal: AbortSignal.timeout(240000), // 4 minutes (fallback before frontend 5min timeout)
+      });
+      if (parseResp.ok) {
+        const data = await parseResp.json();
+        parsedResume = data.parsed;
+        console.log("[Resume] ai-service parsed:", parsedResume?.skills?.length, "skills");
+      } else {
+        console.warn("[Resume] ai-service parse failed:", parseResp.status);
+      }
+    } catch (aiErr) {
+      console.warn("[Resume] ai-service unreachable, falling back to local ATS only:", aiErr);
+    }
 
-    // Save/update in Supabase
+    let finalAtsScore = 0;
+    let strengths: string[] = [];
+    let weaknesses: string[] = [];
+    let improvements: string[] = [];
+    let breakdown: any = null;
+
+    let extractedSkills = {
+      technical: [] as string[],
+      programming: [] as string[],
+      tools: [] as string[],
+      certifications: [] as string[],
+      projects: [] as string[],
+      education: [] as string[],
+      soft: [] as string[],
+      allSkills: [] as string[],
+    };
+
+    if (parsedResume?.ats_analysis) {
+      // Use LLM-generated ATS score and data
+      const ats = parsedResume.ats_analysis;
+      finalAtsScore = ats.ats_score || 0;
+      strengths = ats.strengths || [];
+      weaknesses = ats.weaknesses || [];
+      improvements = ats.improvement_tips || [];
+      breakdown = ats.sub_scores || null;
+      
+      const tech = parsedResume.technical_skills || {};
+      
+      extractedSkills = {
+        technical: [
+          ...(tech.frontend || []),
+          ...(tech.backend || []),
+          ...(tech.database || []),
+          ...(tech.cloud || []),
+          ...(tech.devops || []),
+          ...(tech.machine_learning || []),
+          ...(tech.frameworks || [])
+        ],
+        programming: tech.programming_languages || [],
+        tools: [
+          ...(tech.tools || []),
+          ...(tech.version_control || []),
+          ...(tech.operating_systems || [])
+        ],
+        certifications: parsedResume.certifications?.certifications?.map((c: any) => c.certificate_name?.value).filter(Boolean) || [],
+        projects: parsedResume.projects?.projects?.map((p: any) => p.project_name?.value).filter(Boolean) || [],
+        education: parsedResume.education?.map((e: any) => e.degree?.value).filter(Boolean) || [],
+        soft: parsedResume.soft_skills || [],
+        allSkills: []
+      };
+      
+      extractedSkills.allSkills = [
+        ...extractedSkills.technical,
+        ...extractedSkills.programming,
+        ...extractedSkills.tools,
+        ...extractedSkills.soft
+      ];
+      console.log("[Resume] Using LLM ATS Score:", finalAtsScore);
+    } else {
+      // Fallback to deterministic local scoring
+      const atsInput: ATSInput = {
+        technical: parsedResume?.skills || [],
+        programming: parsedResume?.skills?.filter((s: string) =>
+          ["Python", "JavaScript", "TypeScript", "SQL"].includes(s)
+        ) || [],
+        tools: parsedResume?.other_skills || [],
+        certifications: parsedResume?.certifications?.map((c: any) => c.name) || [],
+        projects: parsedResume?.projects?.map((p: any) => p.name) || [],
+        education: parsedResume?.education?.map((e: any) => e.degree) || [],
+        soft: [],
+        rawText,
+      };
+      const atsResult = calculateATSScore(atsInput);
+      finalAtsScore = atsResult.atsScore;
+      strengths = atsResult.strengths;
+      weaknesses = atsResult.weaknesses;
+      improvements = atsResult.improvements;
+      breakdown = atsResult.breakdown;
+      
+      extractedSkills = {
+        technical: atsInput.technical,
+        programming: atsInput.programming,
+        tools: atsInput.tools,
+        certifications: atsInput.certifications,
+        projects: atsInput.projects,
+        education: atsInput.education,
+        soft: atsInput.soft,
+        allSkills: [...atsInput.technical, ...atsInput.tools]
+      };
+      console.log("[Resume] Using fallback ATS Score:", finalAtsScore);
+    }
+
+    // ── Save/update in Supabase ──────────────────────────────────────────────
     const resume = await createResume({
       user_id: userId,
       file_url: fileUrl,
       file_name: file.name,
       raw_text: rawText.substring(0, 8000),
-      extracted_skills: {
-        technical: review.extractedSkills.technical,
-        programming: review.extractedSkills.programming,
-        tools: review.extractedSkills.tools,
-        certifications: review.extractedSkills.certifications,
-        projects: review.extractedSkills.projects,
-        education: review.extractedSkills.education,
-        soft: review.extractedSkills.soft,
-        allSkills: review.extractedSkills.allSkills,
-      },
-      ats_score: review.atsScore,
-      strengths: review.strengths,
-      weaknesses: review.weaknesses,
-      improvements: review.improvements,
-      breakdown: review.breakdown,
+      extracted_skills: extractedSkills,
+      ats_score: finalAtsScore,
+      strengths,
+      weaknesses,
+      improvements,
+      breakdown,
     });
+
+    // ── Async: generate and store resume embedding (non-blocking) ────────────
+    const resolvedAiUrlForEmbed = getResolvedAiServiceUrl();
+    fetch(`${resolvedAiUrlForEmbed}/resume/embed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        resume_id: resume.id,
+        user_id: userId,
+        text: rawText.substring(0, 4000),
+        skills: extractedSkills.allSkills.slice(0, 50),
+        other_skills: [], // merged into skills above
+        experience_summary: parsedResume?.experience?.experience
+          ?.slice(0, 2)
+          .map((e: any) => `${e.role?.value || "Role"} at ${e.company?.value || "Company"}`)
+          .join("; ") || "",
+        projects_summary: parsedResume?.projects?.projects
+          ?.slice(0, 3)
+          .map((p: any) => p.description?.value || "")
+          .join("; ") || "",
+      }),
+      signal: AbortSignal.timeout(60000),
+    }).catch((e) => console.warn("[Resume] Embedding fire-and-forget failed:", e));
 
     // Immediately generate dynamic recommendations based on the uploaded resume
     // This runs in the background — non-fatal if it fails
@@ -204,13 +361,13 @@ export async function POST(request: NextRequest) {
         strengths: resume.strengths,
         weaknesses: resume.weaknesses,
         improvements: resume.improvements,
-        breakdown: (resume as any).breakdown || review.breakdown,
+        breakdown: (resume as any).breakdown || breakdown,
       },
     });
   } catch (error: any) {
     console.error("Resume upload error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to process resume" },
+      { success: false, message: "Resume upload failed", reason: error.message, stack: error.stack },
       { status: 500 }
     );
   }
@@ -220,10 +377,11 @@ export async function GET(request: NextRequest) {
   try {
     const session = await auth();
     if (!session?.user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json({ success: false, message: "Unauthorized", reason: "No session found", stack: "" }, { status: 401 });
     }
-
-    const resume = await getResumeByUser(session.user.id as string);
+    
+    const userId = session.user.id as string;
+    const resume = await getResumeByUser(userId);
     if (!resume) return NextResponse.json({ resume: null });
 
     return NextResponse.json({
@@ -239,8 +397,11 @@ export async function GET(request: NextRequest) {
         breakdown: (resume as any).breakdown || null,
       },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Resume fetch error:", error);
-    return NextResponse.json({ error: "Failed to fetch resume" }, { status: 500 });
+    return NextResponse.json(
+      { success: false, message: "Failed to fetch resume", reason: error.message, stack: error.stack },
+      { status: 500 }
+    );
   }
 }

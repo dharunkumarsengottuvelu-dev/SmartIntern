@@ -594,7 +594,7 @@ function TabFromUrl({ onTab }: { onTab: (tab: string) => void }) {
 
 // ─── Main Dashboard ────────────────────────────────────────────────────────────
 export default function StudentDashboard() {
-  const { data: session, update: updateSession } = useSession();
+  const { data: session, status, update: updateSession } = useSession();
   const router = useRouter();
   const [activeTab, setActiveTab] = useState("overview");
   const [showNotifications, setShowNotifications] = useState(false);
@@ -666,44 +666,52 @@ export default function StudentDashboard() {
   const [profileSaveSuccess, setProfileSaveSuccess] = useState("");
 
   const fetchData = useCallback(async () => {
+    if (status !== "authenticated") return;
+    
     setLoading(true);
     try {
-      const [resumeRes, assessRes, recRes, profileRes] = await Promise.all([
+      const [resumeRes, assessRes, profileRes] = await Promise.all([
         fetch("/api/resume/upload"),
         fetch("/api/student/assessment"),
-        fetch("/api/recommendation"),
         fetch("/api/student/profile"),
       ]);
-      const [resumeData, assessData, recData, profileData] = await Promise.all([
+      const [resumeData, assessData, profileData] = await Promise.all([
         resumeRes.json(),
         assessRes.json(),
-        recRes.json(),
         profileRes.json(),
       ]);
       if (resumeData.resume) setResume(resumeData.resume);
       if (assessData.assessment) setAssessment(assessData.assessment);
       if (profileData.user) setProfile(profileData.user);
+      else if (profileData.id) setProfile(profileData); // support the new flat profile format
 
-      // If we have a resume but no recommendations, auto-generate them
-      const currentRecs = recData.recommendations || [];
-      if (currentRecs.length === 0 && resumeData.resume) {
-        try {
-          const genRes = await fetch("/api/recommendation", { method: "POST" });
-          const genData = await genRes.json();
-          if (genData.recommendations) setRecommendations(genData.recommendations);
-        } catch (genErr) {
-          console.warn("Auto recommendation generation failed:", genErr);
+      // Only fetch recommendations if we have a resume!
+      if (resumeData.resume) {
+        const recRes = await fetch("/api/recommendation");
+        const recData = await recRes.json();
+        
+        const currentRecs = recData.recommendations || [];
+        if (currentRecs.length === 0) {
+          try {
+            const genRes = await fetch("/api/recommendation", { method: "POST" });
+            const genData = await genRes.json();
+            if (genData.recommendations) setRecommendations(genData.recommendations);
+          } catch (genErr) {
+            console.warn("Auto recommendation generation failed:", genErr);
+            setRecommendations(currentRecs);
+          }
+        } else {
           setRecommendations(currentRecs);
         }
       } else {
-        setRecommendations(currentRecs);
+        setRecommendations([]);
       }
     } catch (e) {
       console.error(e);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [status]);
 
   useEffect(() => {
     setTimeout(() => {
@@ -722,7 +730,11 @@ export default function StudentDashboard() {
     formData.append("resume", file);
 
     try {
-      const res = await fetch("/api/resume/upload", { method: "POST", body: formData });
+      const res = await fetch("/api/resume/upload", { 
+        method: "POST", 
+        body: formData,
+        signal: AbortSignal.timeout(300000) // 5 minutes
+      });
       const data = await res.json();
       if (!res.ok) { setUploadError(data.error || "Upload failed"); return; }
       setUploadSuccess(`Resume analyzed! ATS Score: ${data.resume.atsScore}/100. Redirecting to Assessment...`);

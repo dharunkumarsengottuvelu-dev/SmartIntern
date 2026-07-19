@@ -1,6 +1,23 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { SessionProvider } from "next-auth/react";
+import { Inter, JetBrains_Mono } from "next/font/google";
+
+// next/font downloads font files at build time and serves them locally —
+// no external network request at runtime (eliminates ERR_NAME_NOT_RESOLVED).
+const inter = Inter({
+  subsets: ["latin"],
+  variable: "--font-inter",
+  display: "swap",
+  weight: ["300", "400", "500", "600", "700", "800", "900"],
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
+  display: "swap",
+  weight: ["400", "500"],
+});
 
 export const metadata: Metadata = {
   title: {
@@ -32,10 +49,11 @@ export const viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body className="animated-bg min-h-screen antialiased">
+    <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
+      <body className={`${inter.className} animated-bg min-h-screen antialiased`}>
         <SessionProvider>{children}</SessionProvider>
       </body>
     </html>
   );
 }
+

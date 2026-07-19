@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { getResumeById } from "@/lib/db/resumes";
 import { createAssessment } from "@/lib/db/assessments";
-import { generateMCQs } from "@/lib/openai";
+
+// OFFLINE: MCQ generation uses local ai-service (gemma4:e4b via Ollama).
+// No xAI/Grok calls anywhere in this file.
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
 
 // ── Broad, case-insensitive skill extractor that works directly on raw resume text
 function extractSkillsFromRawText(rawText: string): string[] {
@@ -279,8 +282,24 @@ export async function POST(request: NextRequest) {
     const uniqueSkills = [...new Set(skillsFromDB.map((s) => s.trim()).filter(Boolean))].slice(0, 12);
     console.log("[MCQ] Final skills for question generation:", uniqueSkills);
 
-    // ── Generate MCQs (AI first, then curated bank fallback)
-    const questions = await generateMCQs(uniqueSkills, resume.ats_score || 50);
+    // ── Generate MCQs via local ai-service (gemma4:e4b) ───────────────────
+    let questions: any[] = [];
+    try {
+      const mcqResp = await fetch(`${AI_SERVICE_URL}/generate-mcq`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skills: uniqueSkills, count: 20 }),
+      });
+      if (mcqResp.ok) {
+        const data = await mcqResp.json();
+        questions = data.questions || [];
+        console.log("[MCQ] ai-service generated", questions.length, "questions");
+      } else {
+        console.warn("[MCQ] ai-service returned", mcqResp.status);
+      }
+    } catch (aiErr) {
+      console.error("[MCQ] ai-service unreachable:", aiErr);
+    }
 
     if (!questions || questions.length === 0) {
       return NextResponse.json(

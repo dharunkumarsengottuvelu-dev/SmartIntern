@@ -16,7 +16,8 @@ export interface DbUser {
   id: string;
   name: string;
   email: string;
-  password?: string;
+  password_hash?: string;  // DB column name
+  password?: string;       // alias kept for backward compat with verifyPassword call
   role: "student" | "admin";
   phone?: string;
   college?: string;
@@ -33,8 +34,14 @@ export async function findUserByEmail(email: string, includePassword = false): P
 
   const { data, error } = await query;
   if (error || !data) return null;
-  return data as unknown as DbUser;
+  const user = data as any;
+  // DB column is password_hash — map it to .password for verifyPassword() compatibility
+  if (includePassword && user.password_hash) {
+    user.password = user.password_hash;
+  }
+  return user as unknown as DbUser;
 }
+
 
 export async function findUserById(id: string): Promise<DbUser | null> {
   const sb = getSupabase();
@@ -50,7 +57,7 @@ export async function findUserById(id: string): Promise<DbUser | null> {
 export async function createUser(input: {
   name: string;
   email: string;
-  password: string; // already hashed
+  password: string; // already hashed — stored as password_hash in DB
   role?: string;
   phone?: string;
   college?: string;
@@ -64,7 +71,7 @@ export async function createUser(input: {
     .insert({
       name: input.name.trim(),
       email: input.email.toLowerCase().trim(),
-      password: input.password,
+      password_hash: input.password,  // DB column is password_hash
       role: input.role || "student",
       phone: input.phone?.trim() || null,
       college: input.college?.trim() || null,
@@ -163,7 +170,7 @@ export async function updateUserPassword(email: string, hashed_password: string)
   const { error } = await sb
     .from("users")
     .update({ 
-      password: hashed_password,
+      password_hash: hashed_password,  // DB column is password_hash
       updated_at: new Date().toISOString()
     })
     .eq("email", email.toLowerCase());

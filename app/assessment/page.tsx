@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useSession } from "next-auth/react";
 import {
   Clock, ChevronLeft, ChevronRight, CheckCircle,
   AlertTriangle, Loader2, Zap, BookOpen, XCircle,
@@ -37,6 +38,7 @@ const difficultyBg = {
 function AssessmentPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { status } = useSession();
   const [phase, setPhase] = useState<"setup" | "loading" | "exam" | "submitting" | "done" | "review">("setup");
   const [resumeId, setResumeId] = useState<string | null>(null);
   const [assessmentId, setAssessmentId] = useState<string | null>(null);
@@ -72,10 +74,11 @@ function AssessmentPageInner() {
 
   // Load resume ID
   useEffect(() => {
+    if (status !== "authenticated") return;
     fetch("/api/resume/upload").then((r) => r.json()).then((d) => {
       if (d.resume?.id || d.resume?._id) setResumeId(d.resume.id || d.resume._id);
     });
-  }, []);
+  }, [status]);
 
   // Auto-save to localStorage
   useEffect(() => {

@@ -31,7 +31,9 @@ async function generateAndGetRecommendations(userId: string) {
   // Normalize internship required_skills (can be stored as JSON string or array)
   const normalizedInternships = internships.map((i) => {
     let reqSkills = i.required_skills as any;
-    if (typeof reqSkills === "string") {
+    if (!reqSkills) {
+      reqSkills = [];
+    } else if (typeof reqSkills === "string") {
       try { reqSkills = JSON.parse(reqSkills); } catch {
         reqSkills = reqSkills.split(",").map((s: string) => s.trim());
       }
@@ -109,9 +111,12 @@ export async function GET(request: NextRequest) {
         : null,
     }));
     return NextResponse.json({ recommendations: mappedRecommendations });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Recommendations GET error:", error);
-    return NextResponse.json({ error: "Failed to fetch recommendations" }, { status: 500 });
+    return NextResponse.json(
+      { success: false, message: "Failed to fetch recommendations", reason: error.message, stack: error.stack },
+      { status: 500 }
+    );
   }
 }
 
@@ -123,7 +128,9 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const session = await auth();
-    if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!session?.user) {
+      return NextResponse.json({ success: false, message: "Unauthorized", reason: "No session found", stack: "" }, { status: 401 });
+    }
     const userId = session.user.id as string;
 
     const fresh = await generateAndGetRecommendations(userId);
@@ -151,6 +158,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ recommendations: mapped, generated: fresh.length });
   } catch (error: any) {
     console.error("Recommendation generation error:", error);
-    return NextResponse.json({ error: error.message || "Failed to generate recommendations" }, { status: 500 });
+    return NextResponse.json(
+      { success: false, message: "Failed to generate recommendations", reason: error.message, stack: error.stack },
+      { status: 500 }
+    );
   }
 }

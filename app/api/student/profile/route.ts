@@ -1,17 +1,37 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { findUserById, updateUser } from "@/lib/db/users";
+import { getResumeByUser } from "@/lib/db/resumes";
 
 export async function GET(request: NextRequest) {
   try {
     const session = await auth();
     if (!session?.user?.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json({ success: false, message: "Unauthorized", reason: "No session found", stack: "" }, { status: 401 });
     }
     const user = await findUserById(session.user.id as string);
-    if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
+    if (!user) {
+      return NextResponse.json({ success: false, message: "User not found", reason: "findUserById returned null", stack: "" }, { status: 404 });
+    }
 
+    const resume = await getResumeByUser(session.user.id as string);
+    let skills: string[] = [];
+    if (resume?.extracted_skills) {
+      skills = [
+        ...(resume.extracted_skills.technical || []),
+        ...(resume.extracted_skills.programming || []),
+        ...(resume.extracted_skills.tools || [])
+      ];
+    }
+
+    // Returning exact requested format (root level) + nested user (for backward compatibility)
     return NextResponse.json({
+      id: user.id,
+      name: user.name || "",
+      email: user.email,
+      resume_url: resume?.file_url || "",
+      skills: skills,
+      // Preserved for existing frontend functionality
       user: {
         id: user.id,
         name: user.name,
@@ -23,9 +43,12 @@ export async function GET(request: NextRequest) {
         year: user.year,
       },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Profile fetch error:", error);
-    return NextResponse.json({ error: "Failed to fetch profile" }, { status: 500 });
+    return NextResponse.json(
+      { success: false, message: "Failed to fetch profile", reason: error.message, stack: error.stack },
+      { status: 500 }
+    );
   }
 }
 

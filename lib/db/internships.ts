@@ -14,6 +14,27 @@ export interface DbInternship {
   category: string;
   created_at: string;
   updated_at: string;
+  embedding?: number[];  // pgvector embedding (768-dim nomic-embed-text)
+}
+
+// Fire-and-forget: trigger embedding generation in the ai-service.
+// Non-blocking — a failure here does not prevent the internship from being saved.
+function triggerEmbedding(internship: DbInternship): void {
+  const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
+  fetch(`${AI_SERVICE_URL}/internship/embed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      internship_id: internship.id,
+      title: internship.title,
+      company: internship.company,
+      description: internship.description,
+      required_skills: internship.required_skills,
+      category: internship.category,
+      location: internship.location,
+      duration: internship.duration,
+    }),
+  }).catch((e) => console.warn("[Internships] Embedding trigger failed (non-fatal):", e));
 }
 
 export async function getActiveInternships(opts: { page?: number; limit?: number } = {}): Promise<{ internships: DbInternship[]; total: number }> {
@@ -72,7 +93,9 @@ export async function createInternship(input: {
     .select("*")
     .single();
   if (error) throw error;
-  return data as unknown as DbInternship;
+  const created = data as unknown as DbInternship;
+  triggerEmbedding(created);
+  return created;
 }
 
 export async function updateInternship(id: string, updates: Partial<DbInternship>): Promise<DbInternship> {
@@ -84,7 +107,9 @@ export async function updateInternship(id: string, updates: Partial<DbInternship
     .select("*")
     .single();
   if (error) throw error;
-  return data as unknown as DbInternship;
+  const updated = data as unknown as DbInternship;
+  triggerEmbedding(updated);
+  return updated;
 }
 
 export async function deleteInternship(id: string): Promise<void> {

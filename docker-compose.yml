@@ -1,0 +1,119 @@
+version: "3.9"
+
+# ── IMPORTANT: every service below runs with NO internet access at request time.
+# The only time internet is allowed is ONCE, at build time, to pull Docker
+# images and pip/npm packages. After that, docker compose up must work with
+# the network cable unplugged.
+#
+# To enforce this at the Docker level after first build, uncomment:
+#   networks:
+#     default:
+#       internal: true
+# in the networks section at the bottom of this file.
+
+services:
+  # ── Ollama — local LLM inference ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: smartintern-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      # Bind-mount your existing Ollama model store so gemma4:e4b and
+      # nomic-embed-text are available without re-pulling.
+      # Linux/macOS: ${HOME}/.ollama:/root/.ollama
+      # Windows: change to your actual Ollama data path, e.g.:
+      #   - C:/Users/YourName/.ollama:/root/.ollama
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    # GPU support — uncomment if you have NVIDIA GPU and nvidia-container-toolkit installed
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+
+  # ── Redis — local cache ───────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: smartintern-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── FastAPI AI microservice ───────────────────────────────────────────────────
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile
+    container_name: smartintern-ai
+    ports:
+      - "8000:8000"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379
+      - LLM_MODEL=llama3.2
+      - EMBED_MODEL=nomic-embed-text
+      - OFFLINE_MODE=true
+      - INTERNAL_TOKEN=${AI_SERVICE_INTERNAL_TOKEN:-change-me}
+      - LOG_LEVEL=INFO
+    depends_on:
+      ollama:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 90s
+
+  # ── Next.js app ───────────────────────────────────────────────────────────────
+  nextjs:
+    build:
+      context: .
+      dockerfile: Dockerfile.nextjs
+    container_name: smartintern-web
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.local
+    environment:
+      # AI service — local only, never a cloud URL
+      - AI_SERVICE_URL=http://ai-service:8000
+    depends_on:
+      ai-service:
+        condition: service_healthy
+    extra_hosts:
+      # Allow the container to reach the host machine (where Supabase CLI runs).
+      # On Windows/macOS Docker Desktop this is automatic; on Linux it must be explicit.
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  # Use a named volume OR bind-mount your existing ~/.ollama directory.
+  # Named volume (default — Docker manages it, models already inside):
+  ollama_data:
+  redis_data:
+
+# networks:
+#   default:
+#     internal: true  # uncomment after first build to block all outbound internet

@@ -30,6 +30,6 @@ export const authConfig = {
     strategy: "jwt",
     maxAge: 30 * 24 * 60 * 60, // 30 days
   },
-  secret: process.env.NEXTAUTH_SECRET || "eMZw1jgKeV0dYd1QonADkKo1ANuuD44b1MjkyF+F8cw=",
+  secret: process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET || "eMZw1jgKeV0dYd1QonADkKo1ANuuD44b1MjkyF+F8cw=",
   trustHost: true,
 } satisfies NextAuthConfig;

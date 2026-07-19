@@ -19,6 +19,7 @@ export interface DbResume {
   strengths: string[];
   weaknesses: string[];
   improvements: string[];
+  embedding?: number[];  // pgvector embedding (768-dim nomic-embed-text)
   created_at: string;
   updated_at: string;
 }
