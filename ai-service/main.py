@@ -76,14 +76,20 @@ async def shutdown() -> None:
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-from routers import resume, internship, recommend, chat, feedback, evaluate  # noqa: E402
+from routers.chat import router as chat_router
+from routers.internship import router as internship_router
+from routers.recommend import router as recommend_router
+from routers.feedback import router as feedback_router
+from routers.evaluate import router as evaluate_router
+from api.resume import router as new_resume_router
 
-app.include_router(resume.router)
-app.include_router(internship.router)
-app.include_router(recommend.router)
-app.include_router(chat.router)
-app.include_router(feedback.router)
-app.include_router(evaluate.router)
+# Include routers
+app.include_router(new_resume_router)
+app.include_router(evaluate_router)
+app.include_router(internship_router)
+app.include_router(recommend_router)
+app.include_router(chat_router)
+app.include_router(feedback_router)
 
 
 # ── Health endpoint ───────────────────────────────────────────────────────────
