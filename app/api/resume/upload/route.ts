@@ -16,9 +16,13 @@ async function extractTextFromFile(buffer: Buffer, fileName: string): Promise<st
   let rawText = "";
   if (fileName.match(/\.pdf$/i)) {
     try {
-      const pdfParse = require("pdf-parse");
-      const result = await pdfParse(buffer);
-      rawText = result.text || "";
+      rawText = await new Promise((resolve, reject) => {
+        const PDFParser = require("pdf2json");
+        const pdfParser = new PDFParser(null, 1);
+        pdfParser.on("pdfParser_dataError", (errData: any) => reject(errData.parserError));
+        pdfParser.on("pdfParser_dataReady", () => resolve(pdfParser.getRawTextContent()));
+        pdfParser.parseBuffer(buffer);
+      });
     } catch (e) {
       console.warn("PDF parsing failed:", e);
     }
