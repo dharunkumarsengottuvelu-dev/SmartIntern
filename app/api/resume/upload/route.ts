@@ -6,7 +6,7 @@ import { getActiveInternships } from "@/lib/db/internships";
 import { upsertRecommendation } from "@/lib/db/recommendations";
 import { rankInternships } from "@/lib/recommendation";
 import { StructuredLogger } from "@/lib/logger";
-import { extractText } from "unpdf";
+import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
 import { apiError } from "@/lib/api-response";
 
@@ -17,8 +17,8 @@ async function extractTextFromFile(buffer: Buffer, fileName: string): Promise<st
   let rawText = "";
   if (fileName.match(/\.pdf$/i)) {
     try {
-      const result = await extractText(new Uint8Array(buffer), { mergePages: true });
-      rawText = Array.isArray(result.text) ? result.text.join("\n") : (result.text || "");
+      const result = await pdfParse(buffer);
+      rawText = result.text || "";
     } catch (e) {
       console.warn("PDF parsing failed:", e);
     }
