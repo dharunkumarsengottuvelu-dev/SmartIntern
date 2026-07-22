@@ -623,7 +623,7 @@ function shuffleArray<T>(array: T[]): T[] {
   return arr;
 }
 
-function buildMCQsFromBank(skills: string[]): MCQQuestion[] {
+function buildMCQsFromBank(skills: string[], count: number = 20): MCQQuestion[] {
   const questions: MCQQuestion[] = [];
   
   // Normalize and clean skills
@@ -684,7 +684,7 @@ function buildMCQsFromBank(skills: string[]): MCQQuestion[] {
 
   // Round-robin from matched banks — shift() takes from the front (hardest first)
   let addedFromBank = true;
-  while (questions.length < 20 && addedFromBank) {
+  while (questions.length < count && addedFromBank) {
     addedFromBank = false;
     for (const bankKey of matchedBanks) {
       const q = bankQuestionsMap[bankKey].shift(); // shift = take from front (hardest)
@@ -694,7 +694,7 @@ function buildMCQsFromBank(skills: string[]): MCQQuestion[] {
         }
         addedFromBank = true;
       }
-      if (questions.length >= 20) break;
+      if (questions.length >= count) break;
     }
   }
 
@@ -790,7 +790,7 @@ function buildMCQsFromBank(skills: string[]): MCQQuestion[] {
   const maxAttempts = 100;
   let attempts = 0;
 
-  while (questions.length < 20 && attempts < maxAttempts) {
+  while (questions.length < count && attempts < maxAttempts) {
     attempts++;
     const currentSkill = uniqueCandidateSkills[skillIndex % uniqueCandidateSkills.length];
     const template = dynamicTemplates[templateIndex % dynamicTemplates.length];
@@ -831,7 +831,7 @@ function buildMCQsFromBank(skills: string[]): MCQQuestion[] {
       ...q,
       options: shuffledOptions
     };
-  }).slice(0, 20);
+  }).slice(0, count);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -907,8 +907,8 @@ Return a detailed matching analysis strictly in this JSON format (NO MARKDOWN, N
 // ─────────────────────────────────────────────────────────────────────────────
 // MCQ Generation
 // ─────────────────────────────────────────────────────────────────────────────
-export async function generateMCQs(skills: string[], atsScore: number = 50): Promise<MCQQuestion[]> {
-  if (!skills || skills.length === 0) return buildMCQsFromBank([]);
+export async function generateMCQs(skills: string[], atsScore: number = 50, count: number = 20): Promise<MCQQuestion[]> {
+  if (!skills || skills.length === 0) return buildMCQsFromBank([], count);
 
   const topSkills = skills.slice(0, 10);
   const skillsList = topSkills.join(", ");
@@ -916,7 +916,7 @@ export async function generateMCQs(skills: string[], atsScore: number = 50): Pro
 
   const prompt = `You are a senior technical interviewer at a top MNC (Google, Microsoft, Amazon).
 
-Generate exactly 20 multiple choice questions to assess the candidate's technical knowledge.
+Generate exactly ${count} multiple choice questions to assess the candidate's technical knowledge.
 
 The candidate's skills: ${skillsList}
 The candidate's ATS score: ${atsScore}/100 (Use this to adjust the baseline difficulty of the questions. Higher ATS means slightly more advanced nuances in the medium/hard questions).
@@ -981,16 +981,16 @@ Return ONLY this exact JSON (no markdown, no extra text):
     console.log(`[MCQ] AI returned ${questions.length} valid questions`);
 
     let finalQuestions: MCQQuestion[] = [];
-    if (questions.length >= 15) {
-      finalQuestions = questions.slice(0, 20);
-    } else if (questions.length > 5) {
-      const bankQuestions = buildMCQsFromBank(skills);
+    if (questions.length >= count - 5) {
+      finalQuestions = questions.slice(0, count);
+    } else if (questions.length > 0) {
+      const bankQuestions = buildMCQsFromBank(skills, count);
       const combined = [...questions];
       for (const bq of bankQuestions) {
-        if (combined.length >= 20) break;
+        if (combined.length >= count) break;
         if (!combined.find(q => q.question === bq.question)) combined.push(bq);
       }
-      finalQuestions = combined.slice(0, 20);
+      finalQuestions = combined.slice(0, count);
     } else {
       throw new Error(`Only ${questions.length} valid questions from AI`);
     }

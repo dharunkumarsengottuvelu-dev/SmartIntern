@@ -95,23 +95,65 @@ function AssessmentPageInner() {
             ...(skillsObj.tools || [])
           ].filter(Boolean);
           const uniqueSkills = Array.from(new Set<string>(allSkills));
-          setAvailableSkills(uniqueSkills);
-          setSelectedSkills(uniqueSkills.slice(0, 10)); // Select top 10 by default
+          if (uniqueSkills.length > 0) {
+            setAvailableSkills(uniqueSkills);
+            setSelectedSkills(uniqueSkills.slice(0, 10)); // Select top 10 by default
+          } else {
+            const defaultSkills = ["General Aptitude", "Problem Solving", "Logical Reasoning", "Communication", "Computer Science Basics"];
+            setAvailableSkills(defaultSkills);
+            setSelectedSkills(defaultSkills);
+          }
+        } else {
+          const defaultSkills = ["General Aptitude", "Problem Solving", "Logical Reasoning", "Communication", "Computer Science Basics"];
+          setAvailableSkills(defaultSkills);
+          setSelectedSkills(defaultSkills);
         }
       }
     });
   }, [status]);
 
-  // Auto-save to localStorage
+  // Restore active exam on mount
   useEffect(() => {
-    if (answers.length > 0 && assessmentId) {
-      localStorage.setItem(`assessment_${assessmentId}`, JSON.stringify(answers));
+    if (phase === "setup" && searchParams?.get("mode") !== "review") {
+      try {
+        const stored = localStorage.getItem("active_assessment");
+        if (stored) {
+          const data = JSON.parse(stored);
+          // If the exam is older than 2 hours, discard it
+          if (Date.now() - data.timestamp < 2 * 60 * 60 * 1000) {
+            setAssessmentId(data.assessmentId);
+            setQuestions(data.questions);
+            setAnswers(data.answers || []);
+            setTimeLeft(data.timeLeft > 0 ? data.timeLeft : 0);
+            setPhase("exam");
+          } else {
+            localStorage.removeItem("active_assessment");
+          }
+        }
+      } catch (err) {}
     }
-  }, [answers, assessmentId]);
+  }, [phase, searchParams]);
+
+  // Auto-save active exam to localStorage
+  useEffect(() => {
+    if (phase === "exam" && assessmentId && questions.length > 0) {
+      const state = {
+        assessmentId,
+        questions,
+        answers,
+        timeLeft,
+        timestamp: Date.now()
+      };
+      localStorage.setItem("active_assessment", JSON.stringify(state));
+    }
+  }, [answers, assessmentId, questions, timeLeft, phase]);
 
   const handleSubmit = useCallback(async () => {
-    if (phase === "submitting") return;
-    if (timerRef.current) clearInterval(timerRef.current);
+    if (phase === "submitting" || phase === "done") return;
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
     setShowConfirm(false);
     setPhase("submitting");
     try {
@@ -124,7 +166,7 @@ function AssessmentPageInner() {
       if (!res.ok) { setError(data.error || "Submission failed"); setPhase("exam"); return; }
       setResult(data.result);
       setCorrectAnswerMap(data.correctAnswerMap || {});
-      if (assessmentId) localStorage.removeItem(`assessment_${assessmentId}`);
+      localStorage.removeItem("active_assessment");
 
       // Trigger recommendation generation in background (non-blocking)
       fetch(`${API_BASE}/recommendation`, { method: "POST" }).catch(() => {});

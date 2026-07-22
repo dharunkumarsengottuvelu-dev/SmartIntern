@@ -61,8 +61,8 @@ export function calculateRecommendationScore(
   atsScore: number,
   assessmentPercentage: number
 ): number {
-  // Recommendation weight: 40% skills match, 30% ATS score, 30% Assessment score
-  return Math.round(skillScore * 0.4 + atsScore * 0.3 + assessmentPercentage * 0.3);
+  // Recommendation weight: 60% skills match, 40% Assessment score
+  return Math.round(skillScore * 0.6 + assessmentPercentage * 0.4);
 }
 
 export interface RecommendationResult {

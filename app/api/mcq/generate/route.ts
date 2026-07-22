@@ -3,8 +3,7 @@ import { auth } from "@/lib/auth";
 import { getResumeById } from "@/lib/db/resumes";
 import { createAssessment } from "@/lib/db/assessments";
 import { apiError } from "@/lib/api-response";
-
-const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
+import { generateMCQs } from "@/lib/openai";
 
 // ─────────────────────────────────────────────────────────────
 // Skill extractor from raw text
@@ -242,30 +241,15 @@ export async function POST(request: NextRequest) {
     const uniqueSkills = [...new Set(skillsToUse.map((s) => s.trim()).filter(Boolean))].slice(0, 15);
     console.log("[MCQ] Final skills for generation:", uniqueSkills);
 
-    // ── Step 3: Try AI service first, fall back to question bank
+    // ── Step 4: Use AI generation logic (with fallback to bank)
+    const finalSkillsToUse = uniqueSkills.length > 0 ? uniqueSkills : ["JavaScript", "Python", "SQL"];
     let questions: any[] = [];
-
     try {
-      const mcqResp = await fetch(`${AI_SERVICE_URL}/generate-mcq`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ skills: uniqueSkills, count: questionCount }),
-        signal: AbortSignal.timeout(5000), // 5s timeout
-      });
-      if (mcqResp.ok) {
-        const data = await mcqResp.json();
-        questions = data.questions || [];
-        console.log("[MCQ] AI service generated", questions.length, "questions");
-      }
-    } catch (aiErr) {
-      console.warn("[MCQ] AI service not available, using built-in question bank");
-    }
-
-    // ── Step 4: Use built-in question bank if AI service did not provide questions
-    if (!questions || questions.length === 0) {
-      const skillsToUse = uniqueSkills.length > 0 ? uniqueSkills : ["JavaScript", "Python", "SQL"];
-      questions = generateQuestionsFromBank(skillsToUse, questionCount);
-      console.log("[MCQ] Generated", questions.length, "questions from built-in bank for skills:", skillsToUse);
+      questions = await generateMCQs(finalSkillsToUse, resume.ats_score || 50, questionCount);
+      console.log("[MCQ] Successfully generated/retrieved", questions.length, "questions");
+    } catch (err) {
+      console.error("[MCQ] Failed to generate questions:", err);
+      return apiError("Generation Failed", "Failed to generate questions. Please try again.", err, 500);
     }
 
 

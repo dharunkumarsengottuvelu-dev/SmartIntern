@@ -1556,9 +1556,10 @@ export default function StudentDashboard() {
                               <GraduationCap className="w-3 h-3 text-blue-500" /> Education
                             </p>
                             <ul className="space-y-1">
-                              {(resume.extractedSkills.education || []).map((e, i) => (
+                              {(resume.extractedSkills.education || []).map((e: any, i) => (
                                 <li key={i} className="text-sm text-slate-700 flex items-start gap-2">
-                                  <GraduationCap className="w-3.5 h-3.5 text-blue-500 mt-0.5 shrink-0" /> {e}
+                                  <GraduationCap className="w-3.5 h-3.5 text-blue-500 mt-0.5 shrink-0" /> 
+                                  {typeof e === 'string' ? e : [e.degreeName || e.degreeType, e.school].filter(Boolean).join(" at ") || "Education Details"}
                                 </li>
                               ))}
                             </ul>

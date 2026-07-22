@@ -29,17 +29,19 @@ export async function POST(request: NextRequest) {
       return apiError("Already Submitted", "Assessment already submitted", "You cannot submit an assessment more than once.", 400);
     }
 
-    // Score the answers
+    // Score the answers (iterate over DB questions to prevent duplicate answer exploits)
     let correctAnswers = 0;
-    const scoredAnswers = answers.map((userAnswer: { questionIndex: number; selectedOption: string }) => {
-      const question = assessment.questions[userAnswer.questionIndex];
+    const scoredAnswers = (assessment.questions as any[]).map((question: any, index: number) => {
+      const userAnswer = answers.find((a: any) => a.questionIndex === index);
+      const selectedOption = userAnswer ? userAnswer.selectedOption : null;
+      
       const isCorrect = question && 
-                        typeof userAnswer.selectedOption === "string" && 
+                        typeof selectedOption === "string" && 
                         typeof question.answer === "string" && 
-                        userAnswer.selectedOption.trim() === question.answer.trim();
+                        selectedOption.trim() === question.answer.trim();
       
       if (isCorrect) correctAnswers++;
-      return { questionIndex: userAnswer.questionIndex, selectedOption: userAnswer.selectedOption };
+      return { questionIndex: index, selectedOption };
     });
 
     const totalQuestions = assessment.total_questions || assessment.questions.length || 20;
