@@ -26,10 +26,12 @@ An intelligent, AI-driven internship management platform designed to connect stu
 ## Features
 
 ### Implemented Features
-- AI Resume Parsing (PDF and Word document support).
-- Automated Multiple Choice Question (MCQ) generation and evaluation.
-- AI-driven internship recommendations.
-- Integrated AI chat assistant.
+- **Serverless AI Resume Parsing**: Robust PDF and Word document extraction built for Vercel Edge/Serverless environments.
+- **Anti-Cheat Assessment System**: Server-side enforced looping and strict answer validation to prevent test manipulation.
+- **Persistent Offline-Safe Exam Timers**: MCQ assessments save local state and gracefully recover from page refreshes.
+- **Dynamic AI Question Generation**: Automated multi-difficulty MCQ generation with intelligent fallback logic.
+- **Smart Recommendations**: AI-driven internship matching algorithm weighted by resume skills and assessment scores.
+- **Integrated Chat**: Real-time AI support via chat.
 
 ### Admin Features
 - Dedicated administrator dashboard.
@@ -301,7 +303,8 @@ No license file found.
 ## Author
 
 **Name**: Dharunkumar S  
- 
+**GitHub**: [dharunkumarsengottuvelu-dev](https://github.com/dharunkumarsengottuvelu-dev)  
+**Email**: dharunkumarsengottuvelu@gmail.com
 
 ---
 
