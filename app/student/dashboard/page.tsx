@@ -12,10 +12,13 @@ import {
   Wrench, GraduationCap, Lightbulb, BarChart3, ArrowRight,
   Shield, Globe, Server, User, Edit3,
   X, Save, Phone, Building2, Calendar, AlertCircle,
-  Trophy, ThumbsUp, BookMarked, DollarSign, Bell, CheckCheck, Trash2, Eye,
+  Trophy, ThumbsUp, BookMarked, DollarSign, Bell, CheckCheck, Trash2, Eye, UploadCloud, Edit2, Play,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
 
 import ChatWidget from "@/components/ChatWidget";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
 
 const COLLEGES = [
   "Presidency College",
@@ -352,7 +355,7 @@ function ProfileEditModal({
     setSaving(true);
     setError("");
     try {
-      const res = await fetch("/api/student/profile", {
+      const res = await fetch(`${API_BASE}/student/profile`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),
@@ -664,6 +667,12 @@ export default function StudentDashboard() {
   const [showProfileEdit, setShowProfileEdit] = useState(false);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [profileSaveSuccess, setProfileSaveSuccess] = useState("");
+  
+  // JD Matching State
+  const [jdText, setJdText] = useState("");
+  const [matchingJd, setMatchingJd] = useState(false);
+  const [jdMatchResult, setJdMatchResult] = useState<any>(null);
+  const [jdMatchError, setJdMatchError] = useState("");
 
   const fetchData = useCallback(async () => {
     if (status !== "authenticated") return;
@@ -671,9 +680,9 @@ export default function StudentDashboard() {
     setLoading(true);
     try {
       const [resumeRes, assessRes, profileRes] = await Promise.all([
-        fetch("/api/resume/upload"),
-        fetch("/api/student/assessment"),
-        fetch("/api/student/profile"),
+        fetch(`${API_BASE}/resume/upload`),
+        fetch(`${API_BASE}/student/assessment`),
+        fetch(`${API_BASE}/student/profile`),
       ]);
       const [resumeData, assessData, profileData] = await Promise.all([
         resumeRes.json(),
@@ -687,13 +696,13 @@ export default function StudentDashboard() {
 
       // Only fetch recommendations if we have a resume!
       if (resumeData.resume) {
-        const recRes = await fetch("/api/recommendation");
+        const recRes = await fetch(`${API_BASE}/recommendation`);
         const recData = await recRes.json();
         
         const currentRecs = recData.recommendations || [];
         if (currentRecs.length === 0) {
           try {
-            const genRes = await fetch("/api/recommendation", { method: "POST" });
+            const genRes = await fetch(`${API_BASE}/recommendation`, { method: "POST" });
             const genData = await genRes.json();
             if (genData.recommendations) setRecommendations(genData.recommendations);
           } catch (genErr) {
@@ -730,29 +739,63 @@ export default function StudentDashboard() {
     formData.append("resume", file);
 
     try {
-      const res = await fetch("/api/resume/upload", { 
+      const res = await fetch(`${API_BASE}/resume/upload`, { 
         method: "POST", 
         body: formData,
         signal: AbortSignal.timeout(300000) // 5 minutes
       });
       const data = await res.json();
-      if (!res.ok) { setUploadError(data.error || "Upload failed"); return; }
-      setUploadSuccess(`Resume analyzed! ATS Score: ${data.resume.atsScore}/100. Redirecting to Assessment...`);
-      setResume(data.resume);
-      // Refresh recommendations (generated server-side after upload)
-      const recRes = await fetch("/api/recommendation");
-      const recData = await recRes.json();
-      if (recData.recommendations) setRecommendations(recData.recommendations);
-
-      // Auto redirect to assessment
-      setTimeout(() => {
-        router.push("/assessment");
-      }, 2000);
+      if (!res.ok) { 
+        setUploadError(data.message ? `${data.error}: ${data.message}` : data.error || "Upload failed"); 
+        return; 
+      }
+      if (data.aiAnalysisFailed || data.resume.atsScore === 0) {
+        setUploadError(data.message || "Resume uploaded securely, but the AI analysis is currently unavailable. Please try again later.");
+      } else {
+        setUploadSuccess(`Resume analyzed! ATS Score: ${data.resume.atsScore}/100. Redirecting to Assessment...`);
+        // Refresh recommendations (generated server-side after upload)
+        const recRes = await fetch(`${API_BASE}/recommendation`);
+        const recData = await recRes.json();
+        if (recData.recommendations) setRecommendations(recData.recommendations);
+  
+        // Auto redirect to assessment
+        setTimeout(() => {
+          router.push("/assessment");
+        }, 2000);
+      }
     } catch {
       setUploadError("Upload failed. Please try again.");
     } finally {
       setUploading(false);
       e.target.value = "";
+    }
+  };
+
+  const handleJDMatch = async () => {
+    if (!jdText.trim()) {
+      setJdMatchError("Please enter a job description.");
+      return;
+    }
+    setMatchingJd(true);
+    setJdMatchError("");
+    setJdMatchResult(null);
+
+    try {
+      const res = await fetch(`${API_BASE}/ats/match`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobDescription: jdText })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setJdMatchError(data.error || "Failed to analyze match.");
+        return;
+      }
+      setJdMatchResult(data.data);
+    } catch (err) {
+      setJdMatchError("Network error. Please try again.");
+    } finally {
+      setMatchingJd(false);
     }
   };
 
@@ -1264,6 +1307,12 @@ export default function StudentDashboard() {
                   {/* ATS Results */}
                   {resume && (
                     <>
+                      {resume.atsScore === 0 && (
+                        <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 mb-6 text-amber-700 text-sm font-medium">
+                          <AlertCircle className="w-5 h-5 shrink-0" /> 
+                          AI Analysis is incomplete. Your resume is securely saved, but AI features (score, skills, assessment) will be unavailable until analysis succeeds.
+                        </div>
+                      )}
                       {/* Score + Breakdown */}
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
                         <div className="glass-card p-6 flex flex-col items-center bg-white border border-slate-200 shadow-sm rounded-xl">
@@ -1301,7 +1350,12 @@ export default function StudentDashboard() {
                                   <span className="text-red-500 font-bold mt-0.5 shrink-0">✗</span> {w}
                                 </li>
                               )) : (
-                                <li className="text-sm text-green-600 font-medium">Great job! No major weaknesses found.</li>
+                                <li className="text-sm font-medium">
+                                  {resume.atsScore === 0 
+                                    ? <span className="text-slate-400">Analysis pending to identify areas for improvement.</span>
+                                    : <span className="text-green-600">Great job! No major weaknesses found.</span>
+                                  }
+                                </li>
                               )}
                             </ul>
                           </div>
@@ -1322,6 +1376,108 @@ export default function StudentDashboard() {
                               </li>
                             ))}
                           </ul>
+                        </div>
+                      )}
+
+                      {/* ── ATS Score Breakdown (10 Dimensions) ── */}
+                      {(resume as any).breakdown && (
+                        <div className="glass-card p-5 mb-6 bg-white border border-slate-200 shadow-sm rounded-xl">
+                          <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 mb-4">
+                            <BarChart3 className="w-4 h-4 text-brand-600" /> Detailed ATS Score Breakdown
+                          </h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3">
+                            {[
+                              { label: "Technical Skills", key: "technicalSkills", max: 25, color: "bg-brand-500" },
+                              { label: "Projects & Experience", key: "projects", max: 20, color: "bg-purple-500" },
+                              { label: "Education", key: "education", max: 10, color: "bg-blue-500" },
+                              { label: "Certifications", key: "certifications", max: 8, color: "bg-green-500" },
+                              { label: "Formatting & Structure", key: "formatting", max: 7, color: "bg-yellow-500" },
+                              { label: "Contact Information", key: "contactInfo", max: 7, color: "bg-cyan-500" },
+                              { label: "Professional Summary", key: "professionalSummary", max: 6, color: "bg-indigo-500" },
+                              { label: "Action Verbs", key: "actionVerbs", max: 7, color: "bg-orange-500" },
+                              { label: "Quantified Achievements", key: "quantifiedAchievements", max: 5, color: "bg-rose-500" },
+                              { label: "Soft Skills", key: "softSkills", max: 5, color: "bg-teal-500" },
+                            ].map(({ label, key, max, color }) => {
+                              const val = ((resume as any).breakdown as any)?.[key] ?? 0;
+                              const pct = Math.round((val / max) * 100);
+                              return (
+                                <div key={key}>
+                                  <div className="flex justify-between text-xs mb-1">
+                                    <span className="text-slate-600 font-medium">{label}</span>
+                                    <span className="font-bold text-slate-800">{val}/{max}</span>
+                                  </div>
+                                  <div className="w-full bg-slate-100 rounded-full h-2">
+                                    <div className={`h-2 rounded-full transition-all duration-700 ${color}`} style={{ width: `${pct}%` }} />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ── Domain + Hiring Probability ── */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                        {(resume as any).detectedDomain && (
+                          <div className="glass-card p-5 bg-indigo-50 border border-indigo-200 shadow-sm rounded-xl">
+                            <h3 className="text-sm font-bold text-indigo-700 flex items-center gap-2 mb-3">
+                              <Globe className="w-4 h-4" /> Detected Domain
+                            </h3>
+                            <p className="text-lg font-black text-indigo-900 mb-2">{(resume as any).detectedDomain}</p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {((resume as any).possibleRoles || []).slice(0, 4).map((role: string) => (
+                                <span key={role} className="text-xs px-2.5 py-1 rounded-lg bg-indigo-100 border border-indigo-200 text-indigo-700 font-medium">{role}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {(resume as any).hiringProbability && (
+                          <div className={`glass-card p-5 shadow-sm rounded-xl border ${
+                            (resume as any).hiringProbability === "Very High" ? "bg-green-50 border-green-200" :
+                            (resume as any).hiringProbability === "High" ? "bg-emerald-50 border-emerald-200" :
+                            (resume as any).hiringProbability === "Medium" ? "bg-amber-50 border-amber-200" :
+                            "bg-red-50 border-red-200"
+                          }`}>
+                            <h3 className={`text-sm font-bold flex items-center gap-2 mb-2 ${
+                              ["Very High","High"].includes((resume as any).hiringProbability) ? "text-green-700" :
+                              (resume as any).hiringProbability === "Medium" ? "text-amber-700" : "text-red-700"
+                            }`}>
+                              <TrendingUp className="w-4 h-4" /> Hiring Probability
+                            </h3>
+                            <p className={`text-2xl font-black mb-1 ${
+                              ["Very High","High"].includes((resume as any).hiringProbability) ? "text-green-800" :
+                              (resume as any).hiringProbability === "Medium" ? "text-amber-800" : "text-red-800"
+                            }`}>{(resume as any).hiringProbability}</p>
+                            <div className="flex gap-4 mt-2 text-xs font-semibold flex-wrap">
+                              {(resume as any).readabilityScore && <span className="text-slate-500">Readability: <span className="text-slate-800">{(resume as any).readabilityScore}/100</span></span>}
+                              {(resume as any).professionalismScore && <span className="text-slate-500">Professionalism: <span className="text-slate-800">{(resume as any).professionalismScore}/100</span></span>}
+                              {(resume as any).keywordDensity != null && <span className="text-slate-500">Keyword Density: <span className="text-slate-800">{(resume as any).keywordDensity}%</span></span>}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* ── Recruiter Impression ── */}
+                      {(resume as any).recruiterImpression && (
+                        <div className="glass-card p-5 mb-6 bg-slate-50 border border-slate-200 shadow-sm rounded-xl">
+                          <h3 className="text-sm font-bold text-slate-700 flex items-center gap-2 mb-2">
+                            <Eye className="w-4 h-4 text-slate-500" /> Recruiter Impression
+                          </h3>
+                          <p className="text-sm text-slate-600 leading-relaxed italic">"{(resume as any).recruiterImpression}"</p>
+                        </div>
+                      )}
+
+                      {/* ── Missing Skills Alert ── */}
+                      {(resume as any).missingSkills?.length > 0 && (
+                        <div className="glass-card p-5 mb-6 bg-rose-50 border border-rose-200 shadow-sm rounded-xl">
+                          <h3 className="text-sm font-bold text-rose-700 flex items-center gap-2 mb-3">
+                            <AlertCircle className="w-4 h-4" /> Missing Essential Skills (Add to Resume)
+                          </h3>
+                          <div className="flex flex-wrap gap-2">
+                            {(resume as any).missingSkills.map((skill: string) => (
+                              <span key={skill} className="text-xs px-2.5 py-1 rounded-lg bg-white border border-rose-300 text-rose-700 font-medium">+ {skill}</span>
+                            ))}
+                          </div>
                         </div>
                       )}
 
@@ -1357,7 +1513,7 @@ export default function StudentDashboard() {
                             {
                               label: "Certifications",
                               icon: Award,
-                              skills: resume.extractedSkills.certifications || [],
+                              skills: (resume.extractedSkills.certifications || []).map((c: any) => typeof c === 'string' ? c : c.certificationName).filter(Boolean),
                               variant: "green" as const,
                               color: "bg-green-500",
                             },
@@ -1409,6 +1565,105 @@ export default function StudentDashboard() {
                           </div>
                         )}
                       </div>
+                      
+                      {/* ── Job Description Matching ── */}
+                      <div className="glass-card p-6 mt-6 bg-white border border-slate-200 shadow-sm rounded-xl">
+                        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2 mb-2">
+                          <Briefcase className="w-5 h-5 text-brand-600" /> Job Description Matcher
+                        </h3>
+                        <p className="text-sm text-slate-500 mb-4">Paste a job description below to see how well your resume matches it.</p>
+                        
+                        <div className="mb-4">
+                          <textarea
+                            className="w-full h-32 p-3 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 outline-none resize-none transition-all"
+                            placeholder="Paste job description here..."
+                            value={jdText}
+                            onChange={(e) => setJdText(e.target.value)}
+                          />
+                        </div>
+                        
+                        {jdMatchError && (
+                          <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-200 p-3 rounded-lg flex items-center gap-2">
+                            <XCircle className="w-4 h-4 shrink-0" /> {jdMatchError}
+                          </div>
+                        )}
+
+                        <button
+                          onClick={handleJDMatch}
+                          disabled={matchingJd}
+                          className="btn-brand w-full md:w-auto px-6 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-medium flex items-center justify-center gap-2 transition-all disabled:opacity-70 disabled:cursor-not-allowed"
+                        >
+                          {matchingJd ? (
+                            <><div className="w-4 h-4 rounded-full border-2 border-white border-t-transparent animate-spin" /> Analyzing Match...</>
+                          ) : (
+                            <><Target className="w-4 h-4" /> Analyze Match</>
+                          )}
+                        </button>
+
+                        {jdMatchResult && (
+                          <div className="mt-6 pt-6 border-t border-slate-100 animate-in fade-in slide-in-from-bottom-2">
+                            <div className="flex items-center justify-between mb-6">
+                              <h4 className="text-md font-bold text-slate-800">Match Results</h4>
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-semibold text-slate-500">Overall Match</span>
+                                <span className={`text-xl font-black ${
+                                  jdMatchResult.matchScore >= 80 ? "text-green-600" :
+                                  jdMatchResult.matchScore >= 60 ? "text-amber-600" : "text-red-600"
+                                }`}>{jdMatchResult.matchScore}%</span>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                              <div className="bg-green-50 border border-green-100 p-4 rounded-xl">
+                                <h5 className="text-xs font-bold text-green-800 uppercase tracking-wider mb-3 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5" /> Matched Skills</h5>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {jdMatchResult.matchedSkills.length > 0 ? (
+                                    jdMatchResult.matchedSkills.map((s: string) => <SkillChip key={s} skill={s} variant="green" />)
+                                  ) : (
+                                    <span className="text-xs text-green-600/70 italic">None found</span>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="bg-rose-50 border border-rose-100 p-4 rounded-xl">
+                                <h5 className="text-xs font-bold text-rose-800 uppercase tracking-wider mb-3 flex items-center gap-1.5"><AlertCircle className="w-3.5 h-3.5" /> Missing Skills</h5>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {jdMatchResult.missingSkills.length > 0 ? (
+                                    jdMatchResult.missingSkills.map((s: string) => <SkillChip key={s} skill={s} variant="red" />)
+                                  ) : (
+                                    <span className="text-xs text-rose-600/70 italic">None! Perfect match.</span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="space-y-4">
+                              <div className="bg-slate-50 border border-slate-100 p-4 rounded-xl">
+                                <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2 flex items-center gap-1.5"><Briefcase className="w-3.5 h-3.5" /> Experience Alignment</h5>
+                                <p className="text-sm text-slate-600">{jdMatchResult.experienceMatch}</p>
+                              </div>
+                              <div className="bg-slate-50 border border-slate-100 p-4 rounded-xl">
+                                <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2 flex items-center gap-1.5"><GraduationCap className="w-3.5 h-3.5" /> Education Alignment</h5>
+                                <p className="text-sm text-slate-600">{jdMatchResult.educationMatch}</p>
+                              </div>
+                              <div className="bg-slate-50 border border-slate-100 p-4 rounded-xl">
+                                <h5 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2 flex items-center gap-1.5"><Star className="w-3.5 h-3.5" /> Culture & Soft Skills</h5>
+                                <p className="text-sm text-slate-600">{jdMatchResult.cultureFit}</p>
+                              </div>
+                              {jdMatchResult.recommendations?.length > 0 && (
+                                <div className="bg-brand-50 border border-brand-100 p-4 rounded-xl">
+                                  <h5 className="text-xs font-bold text-brand-800 uppercase tracking-wider mb-2 flex items-center gap-1.5"><Lightbulb className="w-3.5 h-3.5" /> Actionable Recommendations</h5>
+                                  <ul className="list-disc list-inside space-y-1">
+                                    {jdMatchResult.recommendations.map((r: string, i: number) => (
+                                      <li key={i} className="text-sm text-brand-700">{r}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
                     </>
                   )}
 

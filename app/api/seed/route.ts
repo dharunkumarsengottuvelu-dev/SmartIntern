@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/supabase";
+import { apiError } from "@/lib/api-response";
 
 export async function GET() {
   try {
@@ -47,11 +48,11 @@ export async function GET() {
     const { data, error } = await sb.from("internships").insert(internships).select();
 
     if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+      return apiError("Database Error", "Failed to insert internships", error, 500);
     }
 
     return NextResponse.json({ success: true, message: "Internships seeded successfully!", inserted: data });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return apiError("Seed Failed", "Failed to seed internships", err, 500);
   }
 }

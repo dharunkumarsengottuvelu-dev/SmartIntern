@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useId } from "react";
 import { X, Send, Trash2, Shield, AlertCircle } from "lucide-react";
 
 interface Message {
@@ -10,9 +10,9 @@ interface Message {
 
 // The InternX logo — exact same four-chevron gradient mark used in the navbar
 // Each instance gets a unique gradient id to avoid SVG conflicts
-let logoIdCounter = 0;
 function InternXLogo({ size = 28 }: { size?: number }) {
-  const [id] = useState(() => `chatLogo_${++logoIdCounter}`);
+  const reactId = useId();
+  const id = `chatLogo_${reactId.replace(/:/g, "")}`;
   return (
     <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" width={size} height={size}>
       <defs>

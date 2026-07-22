@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { findUserByEmail, createUser, hashPassword } from "@/lib/db/users";
+import { apiError } from "@/lib/api-response";
 
 export async function POST(request: NextRequest) {
   try {
@@ -7,26 +8,17 @@ export async function POST(request: NextRequest) {
     const { name, email, password, phone, college, degree, department, year } = body;
 
     if (!name || !email || !password) {
-      return NextResponse.json(
-        { error: "Name, email, and password are required" },
-        { status: 400 }
-      );
+      return apiError("Bad Request", "Name, email, and password are required", undefined, 400);
     }
 
     if (password.length < 6) {
-      return NextResponse.json(
-        { error: "Password must be at least 6 characters" },
-        { status: 400 }
-      );
+      return apiError("Bad Request", "Password must be at least 6 characters", undefined, 400);
     }
 
     // Check for existing user
     const existing = await findUserByEmail(email);
     if (existing) {
-      return NextResponse.json(
-        { error: "An account with this email already exists" },
-        { status: 409 }
-      );
+      return apiError("Conflict", "An account with this email already exists", undefined, 409);
     }
 
     // Hash password using native crypto
@@ -61,8 +53,8 @@ export async function POST(request: NextRequest) {
     console.error("Register error:", error);
     if (error?.code === "23505") {
       // PostgreSQL unique violation
-      return NextResponse.json({ error: "Email already exists" }, { status: 409 });
+      return apiError("Conflict", "Email already exists", undefined, 409);
     }
-    return NextResponse.json({ error: "Server error. Details: " + (error?.message || error?.details || JSON.stringify(error) || "Unknown error") }, { status: 500 });
+    return apiError("Registration Failed", "Server error occurred during registration", error, 500);
   }
 }

@@ -2,25 +2,35 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { findUserById, updateUser } from "@/lib/db/users";
 import { getResumeByUser } from "@/lib/db/resumes";
+import { apiError } from "@/lib/api-response";
 
 export async function GET(request: NextRequest) {
   try {
     const session = await auth();
     if (!session?.user?.id) {
-      return NextResponse.json({ success: false, message: "Unauthorized", reason: "No session found", stack: "" }, { status: 401 });
+      return apiError("Unauthorized", "No active session found", "Please log in to view your profile.", 401);
     }
-    const user = await findUserById(session.user.id as string);
+
+    const userId = session.user.id as string;
+    // Basic UUID validation
+    const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+    if (!uuidRegex.test(userId)) {
+      return apiError("Invalid Session", "Session contains an invalid user identifier", "Expected a valid UUID but received an invalid string format. Please log out and log in again.", 400);
+    }
+
+    const user = await findUserById(userId);
     if (!user) {
-      return NextResponse.json({ success: false, message: "User not found", reason: "findUserById returned null", stack: "" }, { status: 404 });
+      return apiError("User not found", "The requested user profile does not exist", "Your session may be stale or the account was deleted. Please log in again.", 404);
     }
 
     const resume = await getResumeByUser(session.user.id as string);
     let skills: string[] = [];
     if (resume?.extracted_skills) {
-      skills = [
-        ...(resume.extracted_skills.technical || []),
-        ...(resume.extracted_skills.programming || []),
-        ...(resume.extracted_skills.tools || [])
+      const ex = resume.extracted_skills as any;
+      skills = Array.isArray(ex.allSkills) ? ex.allSkills : [
+        ...(ex.technical || []),
+        ...(ex.programming || []),
+        ...(ex.tools || [])
       ];
     }
 
@@ -45,10 +55,7 @@ export async function GET(request: NextRequest) {
     });
   } catch (error: any) {
     console.error("Profile fetch error:", error);
-    return NextResponse.json(
-      { success: false, message: "Failed to fetch profile", reason: error.message, stack: error.stack },
-      { status: 500 }
-    );
+    return apiError("Profile fetch failed", "An unexpected error occurred while fetching the profile", error, 500);
   }
 }
 
@@ -56,14 +63,14 @@ export async function PATCH(request: NextRequest) {
   try {
     const session = await auth();
     if (!session?.user?.id) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return apiError("Unauthorized", "No active session found", "Please log in to update your profile.", 401);
     }
 
     const body = await request.json();
     const { name, phone, college, degree, department, year } = body;
 
     if (!name || name.trim().length < 2) {
-      return NextResponse.json({ error: "Name is required (min 2 characters)" }, { status: 400 });
+      return apiError("Validation Error", "Invalid name provided", "Name is required and must be at least 2 characters long.", 400);
     }
 
     const updated = await updateUser(session.user.id as string, {
@@ -90,9 +97,6 @@ export async function PATCH(request: NextRequest) {
     });
   } catch (error: any) {
     console.error("Profile update error:", error);
-    return NextResponse.json(
-      { error: error.message || "Failed to update profile" },
-      { status: 500 }
-    );
+    return apiError("Profile update failed", "An unexpected error occurred while updating the profile", error, 500);
   }
 }

@@ -5,6 +5,7 @@ import { getResumeByUser } from "@/lib/db/resumes";
 import { getLatestAssessmentByUser } from "@/lib/db/assessments";
 import { getRecommendationsByUser } from "@/lib/db/recommendations";
 import { getActiveInternships } from "@/lib/db/internships";
+import { apiError } from "@/lib/api-response";
 
 // OFFLINE: All LLM calls go through the local ai-service (Ollama/gemma4:e4b).
 // There is NO cloud LLM fallback — any fallback that calls an external host
@@ -28,7 +29,7 @@ export async function POST(request: NextRequest) {
     } else {
       const session = await auth();
       if (!session?.user) {
-        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+        return apiError("Unauthorized", "Session required for chat", undefined, 401);
       }
       userId = session.user.id as string;
     }
@@ -37,7 +38,7 @@ export async function POST(request: NextRequest) {
     messages = body.messages;
 
     if (!messages || !Array.isArray(messages)) {
-      return NextResponse.json({ error: "Messages array is required." }, { status: 400 });
+      return apiError("Bad Request", "Messages array is required.", undefined, 400);
     }
   } catch (err: any) {
     console.error("[Chat] Initial body parsing / auth failed:", err?.message || err);

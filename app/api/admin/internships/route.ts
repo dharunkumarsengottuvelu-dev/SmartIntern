@@ -6,6 +6,7 @@ import {
   updateInternship,
   deleteInternship,
 } from "@/lib/db/internships";
+import { apiError } from "@/lib/api-response";
 
 async function requireAdmin() {
   const session = await auth();
@@ -15,7 +16,7 @@ async function requireAdmin() {
 
 export async function GET(request: NextRequest) {
   const session = await requireAdmin();
-  if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!session) return apiError("Forbidden", "Admin access required", undefined, 403);
 
   try {
     const { searchParams } = new URL(request.url);
@@ -25,20 +26,20 @@ export async function GET(request: NextRequest) {
     const { internships, total } = await getAllInternships({ page, limit, search });
     return NextResponse.json({ internships, total, page, limit });
   } catch (error) {
-    return NextResponse.json({ error: "Failed to fetch internships" }, { status: 500 });
+    return apiError("Fetch Failed", "Failed to fetch internships", error, 500);
   }
 }
 
 export async function POST(request: NextRequest) {
   const session = await requireAdmin();
-  if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!session) return apiError("Forbidden", "Admin access required", undefined, 403);
 
   try {
     const body = await request.json();
     const { title, company, description, requiredSkills, location, duration, stipend, applyLink, category } = body;
 
     if (!title || !company || !description || !location || !applyLink) {
-      return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
+      return apiError("Bad Request", "Missing required fields", undefined, 400);
     }
 
     const skillsArray = Array.isArray(requiredSkills)
@@ -57,18 +58,18 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ internship }, { status: 201 });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to create" }, { status: 500 });
+    return apiError("Create Failed", "Failed to create internship", error, 500);
   }
 }
 
 export async function PUT(request: NextRequest) {
   const session = await requireAdmin();
-  if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!session) return apiError("Forbidden", "Admin access required", undefined, 403);
 
   try {
     const body = await request.json();
     const { id, ...updates } = body;
-    if (!id) return NextResponse.json({ error: "ID required" }, { status: 400 });
+    if (!id) return apiError("Bad Request", "ID required", undefined, 400);
 
     if (updates.requiredSkills && typeof updates.requiredSkills === "string") {
       updates.required_skills = updates.requiredSkills.split(",").map((s: string) => s.trim()).filter(Boolean);
@@ -80,21 +81,21 @@ export async function PUT(request: NextRequest) {
     const internship = await updateInternship(id, updates);
     return NextResponse.json({ internship });
   } catch (error: any) {
-    return NextResponse.json({ error: error.message || "Failed to update" }, { status: 500 });
+    return apiError("Update Failed", "Failed to update internship", error, 500);
   }
 }
 
 export async function DELETE(request: NextRequest) {
   const session = await requireAdmin();
-  if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!session) return apiError("Forbidden", "Admin access required", undefined, 403);
 
   try {
     const { searchParams } = new URL(request.url);
     const id = searchParams.get("id");
-    if (!id) return NextResponse.json({ error: "ID required" }, { status: 400 });
+    if (!id) return apiError("Bad Request", "ID required", undefined, 400);
     await deleteInternship(id);
     return NextResponse.json({ success: true });
   } catch (error) {
-    return NextResponse.json({ error: "Failed to delete" }, { status: 500 });
+    return apiError("Delete Failed", "Failed to delete internship", error, 500);
   }
 }

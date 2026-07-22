@@ -9,6 +9,8 @@ import {
   RotateCcw, ArrowRight, Eye,
 } from "lucide-react";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
+
 
 interface Question {
   index: number;
@@ -41,6 +43,11 @@ function AssessmentPageInner() {
   const { status } = useSession();
   const [phase, setPhase] = useState<"setup" | "loading" | "exam" | "submitting" | "done" | "review">("setup");
   const [resumeId, setResumeId] = useState<string | null>(null);
+  const [availableSkills, setAvailableSkills] = useState<string[]>([]);
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  const [detectedDomain, setDetectedDomain] = useState<string | null>(null);
+  const [possibleRoles, setPossibleRoles] = useState<string[]>([]);
+  const [questionCount, setQuestionCount] = useState<10 | 15 | 20>(15);
   const [assessmentId, setAssessmentId] = useState<string | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [answers, setAnswers] = useState<Answer[]>([]);
@@ -72,11 +79,26 @@ function AssessmentPageInner() {
   }, [searchParams]);
 
 
-  // Load resume ID
+  // Load resume ID and extracted skills
   useEffect(() => {
     if (status !== "authenticated") return;
-    fetch("/api/resume/upload").then((r) => r.json()).then((d) => {
-      if (d.resume?.id || d.resume?._id) setResumeId(d.resume.id || d.resume._id);
+    fetch(`${API_BASE}/resume/upload`).then((r) => r.json()).then((d) => {
+      if (d.resume?.id || d.resume?._id) {
+        setResumeId(d.resume.id || d.resume._id);
+        if (d.resume.detectedDomain) setDetectedDomain(d.resume.detectedDomain);
+        if (d.resume.possibleRoles) setPossibleRoles(d.resume.possibleRoles);
+        if (d.resume.extractedSkills) {
+          const skillsObj = d.resume.extractedSkills;
+          const allSkills = [
+            ...(skillsObj.programming || []),
+            ...(skillsObj.technical || []),
+            ...(skillsObj.tools || [])
+          ].filter(Boolean);
+          const uniqueSkills = Array.from(new Set<string>(allSkills));
+          setAvailableSkills(uniqueSkills);
+          setSelectedSkills(uniqueSkills.slice(0, 10)); // Select top 10 by default
+        }
+      }
     });
   }, [status]);
 
@@ -88,11 +110,12 @@ function AssessmentPageInner() {
   }, [answers, assessmentId]);
 
   const handleSubmit = useCallback(async () => {
+    if (phase === "submitting") return;
     if (timerRef.current) clearInterval(timerRef.current);
     setShowConfirm(false);
     setPhase("submitting");
     try {
-      const res = await fetch("/api/mcq/submit", {
+      const res = await fetch(`${API_BASE}/mcq/submit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ assessmentId, answers }),
@@ -104,14 +127,14 @@ function AssessmentPageInner() {
       if (assessmentId) localStorage.removeItem(`assessment_${assessmentId}`);
 
       // Trigger recommendation generation in background (non-blocking)
-      fetch("/api/recommendation", { method: "POST" }).catch(() => {});
+      fetch(`${API_BASE}/recommendation`, { method: "POST" }).catch(() => {});
 
       setPhase("done");
     } catch {
       setError("Submission failed. Please try again.");
       setPhase("exam");
     }
-  }, [assessmentId, answers]);
+  }, [assessmentId, answers, phase]);
 
   // Timer
   useEffect(() => {
@@ -128,19 +151,23 @@ function AssessmentPageInner() {
 
   const startAssessment = async () => {
     if (!resumeId) { setError("No resume found. Please upload your resume first."); return; }
+    if (selectedSkills.length === 0 && availableSkills.length > 0) {
+      setError("Please select at least one skill to be tested on.");
+      return;
+    }
     setPhase("loading");
     setError("");
     try {
-      const res = await fetch("/api/mcq/generate", {
+      const res = await fetch(`${API_BASE}/mcq/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ resumeId }),
+        body: JSON.stringify({ resumeId, selectedSkills, questionCount }),
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error || "Failed to generate questions"); setPhase("setup"); return; }
       setAssessmentId(data.assessmentId);
       setQuestions(data.questions);
-      setTimeLeft(data.timeLimit || 1800);
+      setTimeLeft(data.timeLimit || questionCount * 90);
       setPhase("exam");
     } catch {
       setError("Failed to start assessment. Please try again.");
@@ -160,55 +187,147 @@ function AssessmentPageInner() {
     });
   };
 
+  const toggleSkill = (skill: string) => {
+    setSelectedSkills(prev => 
+      prev.includes(skill) 
+        ? prev.filter(s => s !== skill) 
+        : [...prev, skill].slice(0, 15) // Max 15 skills
+    );
+  };
+
   const currentAnswer = answers.find((a) => a.questionIndex === currentQ)?.selectedOption;
   const answeredCount = answers.length;
   const formatTime = (s: number) => `${Math.floor(s / 60).toString().padStart(2, "0")}:${(s % 60).toString().padStart(2, "0")}`;
   const currentQuestion = questions[currentQ];
 
-  // ── SETUP PHASE ──────────────────────────────────────────────────────────
   if (phase === "setup") {
     return (
-      <div className="min-h-screen flex items-center justify-center px-4 bg-slate-50">
-        <div className="glass-card p-10 max-w-lg w-full text-center page-enter bg-white border border-slate-200 shadow-md rounded-2xl">
-          <div className="w-16 h-16 rounded-2xl bg-brand-50 border border-brand-100 flex items-center justify-center mx-auto mb-6">
-            <Zap className="w-8 h-8 text-brand-600" />
+      <div className="min-h-screen flex items-center justify-center px-4 bg-slate-50 py-12">
+        <div className="glass-card p-8 max-w-2xl w-full page-enter bg-white border border-slate-200 shadow-md rounded-2xl">
+          <div className="text-center mb-6">
+            <div className="w-16 h-16 rounded-2xl bg-brand-50 border border-brand-100 flex items-center justify-center mx-auto mb-4">
+              <Zap className="w-8 h-8 text-brand-600" />
+            </div>
+            <h1 className="text-2xl font-bold text-slate-900 mb-1">AI Skill Assessment</h1>
+            <p className="text-slate-500 text-sm leading-relaxed">Customized based on your resume. Select the skills you want to be tested on.</p>
           </div>
-          <h1 className="text-2xl font-bold text-slate-900 mb-2">Skill Assessment</h1>
-          <p className="text-slate-600 mb-8 leading-relaxed">
-            20 AI-generated questions based on the skills in your resume. Your answers will determine your internship recommendation score.
-          </p>
-          <div className="grid grid-cols-3 gap-3 mb-8 text-sm">
-            {[
-              { icon: Clock, label: "30 minutes", sub: "Time limit" },
-              { icon: BookOpen, label: "20 questions", sub: "MCQ format" },
-              { icon: CheckCircle, label: "1 mark each", sub: "No negatives" },
-            ].map(({ icon: Icon, label, sub }) => (
-              <div key={label} className="glass-card p-3 rounded-xl bg-slate-50 border border-slate-200 shadow-none">
-                <Icon className="w-5 h-5 text-brand-600 mx-auto mb-1" />
-                <div className="font-semibold text-slate-800 text-xs">{label}</div>
-                <div className="text-slate-500 text-xs">{sub}</div>
+
+          {/* Domain Badge */}
+          {detectedDomain && (
+            <div className="mb-5 p-3 rounded-xl bg-indigo-50 border border-indigo-200 flex flex-wrap items-center gap-2">
+              <span className="text-xs font-bold text-indigo-700 uppercase tracking-wide">Detected Domain:</span>
+              <span className="text-sm font-black text-indigo-900">{detectedDomain}</span>
+              {possibleRoles.slice(0, 3).map(r => (
+                <span key={r} className="text-xs px-2 py-0.5 rounded-md bg-indigo-100 text-indigo-700 font-medium">{r}</span>
+              ))}
+            </div>
+          )}
+
+          {/* Config row */}
+          <div className="grid grid-cols-2 gap-3 mb-5">
+
+            <div className="col-span-2">
+              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Number of Questions</label>
+              <div className="flex gap-2">
+                {([10, 15, 20] as const).map(n => (
+                  <button
+                    key={n}
+                    onClick={() => setQuestionCount(n)}
+                    className={`flex-1 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+                      questionCount === n
+                        ? "bg-brand-600 text-white border-brand-600"
+                        : "bg-white text-slate-600 border-slate-300 hover:border-brand-400"
+                    }`}
+                  >{n}</button>
+                ))}
               </div>
-            ))}
+            </div>
           </div>
+
+          {/* Time info */}
+          <div className="flex gap-3 mb-5 text-xs">
+            <div className="flex-1 bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-center">
+              <Clock className="w-4 h-4 text-brand-600 mx-auto mb-1" />
+              <div className="font-bold text-slate-800">{Math.round(questionCount * 1.5)} min</div>
+              <div className="text-slate-500">Time limit</div>
+            </div>
+            <div className="flex-1 bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-center">
+              <BookOpen className="w-4 h-4 text-brand-600 mx-auto mb-1" />
+              <div className="font-bold text-slate-800">{questionCount} Qs</div>
+              <div className="text-slate-500">MCQ format</div>
+            </div>
+            <div className="flex-1 bg-slate-50 border border-slate-200 rounded-lg p-2.5 text-center">
+              <CheckCircle className="w-4 h-4 text-brand-600 mx-auto mb-1" />
+              <div className="font-bold text-slate-800">1 mark</div>
+              <div className="text-slate-500">No negatives</div>
+            </div>
+          </div>
+
+          {availableSkills.length > 0 ? (
+            <div className="mb-5 text-left bg-slate-50 p-4 rounded-xl border border-slate-200">
+              <div className="flex justify-between items-center mb-3">
+                <h3 className="font-bold text-slate-800 text-sm">Skills Extracted from Resume</h3>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-slate-500 font-bold bg-white px-2 py-1 border border-slate-200 rounded-md">
+                    Selected Skills ({selectedSkills.length})
+                  </span>
+                  <div className="flex gap-2">
+                    <button onClick={() => setSelectedSkills(availableSkills)} className="text-xs bg-slate-200 text-slate-700 hover:bg-slate-300 px-2 py-1 rounded-md font-medium transition-colors">Select All</button>
+                    <button onClick={() => setSelectedSkills([])} className="text-xs bg-slate-200 text-slate-700 hover:bg-slate-300 px-2 py-1 rounded-md font-medium transition-colors">Clear Selection</button>
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {availableSkills.map((skill) => {
+                  const isSelected = selectedSkills.includes(skill);
+                  return (
+                    <button
+                      key={skill}
+                      onClick={() => toggleSkill(skill)}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-all transform hover:scale-105 active:scale-95 ${
+                        isSelected
+                          ? "bg-brand-600 border-brand-600 text-white shadow-md shadow-brand-500/20"
+                          : "bg-white border-slate-300 text-slate-600 hover:border-brand-400 hover:bg-brand-50"
+                      }`}
+                    >
+                      {isSelected && <span className="mr-1 opacity-80">✓</span>}{skill}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            resumeId && (
+              <div className="mb-5 text-left bg-slate-50 p-6 rounded-xl border border-slate-200 text-center">
+                <AlertTriangle className="w-8 h-8 text-amber-500 mx-auto mb-2" />
+                <h3 className="font-bold text-slate-800 text-sm mb-1">No skills were detected from your resume.</h3>
+                <p className="text-xs text-slate-500 mb-4">We could not extract any technical skills to generate an assessment.</p>
+                <button onClick={() => router.push("/student/dashboard")} className="px-4 py-2 bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg text-sm font-semibold transition-colors">
+                  Re-analyze Resume
+                </button>
+              </div>
+            )
+          )}
+
           {error && (
-            <div className="flex items-center gap-2 bg-red-50 border border-red-100 rounded-lg px-4 py-3 mb-5 text-red-700 text-sm">
+            <div className="flex items-center gap-2 bg-red-50 border border-red-100 rounded-lg px-4 py-3 mb-4 text-red-700 text-sm">
               <AlertTriangle className="w-4 h-4" /> {error}
             </div>
           )}
           {!resumeId && (
-            <div className="bg-yellow-50 border border-yellow-100 rounded-lg px-4 py-3 mb-5 text-yellow-700 text-sm">
+            <div className="bg-yellow-50 border border-yellow-100 rounded-lg px-4 py-3 mb-4 text-yellow-700 text-sm">
               Please upload your resume first before taking the assessment.
             </div>
           )}
           <button
             id="start-assessment"
             onClick={startAssessment}
-            disabled={!resumeId}
-            className="btn-brand w-full py-3 bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-medium"
+            disabled={!resumeId || selectedSkills.length === 0}
+            className="btn-brand w-full py-3 bg-brand-600 hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl font-semibold text-sm transition-colors"
           >
-            {resumeId ? "Start Assessment" : "Upload Resume First"}
+            {resumeId ? `Generate ${questionCount} Questions & Start →` : "Upload Resume First"}
           </button>
-          <button onClick={() => router.push("/student/dashboard")} className="text-sm text-slate-500 hover:text-slate-700 mt-4 block w-full font-medium transition-colors">
+          <button onClick={() => router.push("/student/dashboard")} className="text-sm text-slate-500 hover:text-slate-700 mt-3 block w-full font-medium transition-colors text-center">
             ← Back to Dashboard
           </button>
         </div>
@@ -570,7 +689,19 @@ function AssessmentPageInner() {
         </div>
 
         {/* Main area */}
-        <div className="flex flex-col md:flex-row flex-1 gap-0">
+        <div className="flex flex-col md:flex-row flex-1 gap-0 relative">
+          {error && (
+            <div className="absolute top-4 left-4 right-4 z-20 flex items-center justify-between gap-2 bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-red-700 text-sm shadow-sm">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-red-500" />
+                <span className="font-medium">{error}</span>
+              </div>
+              <button onClick={() => setError("")} className="text-red-400 hover:text-red-600">
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+          )}
+
           {/* Question navigator */}
           <div className="w-full md:w-56 glass-card rounded-none border-b md:border-b-0 md:border-r border-slate-200 p-4 bg-white overflow-x-auto md:overflow-y-auto">
             <p className="text-xs text-slate-500 font-semibold mb-2 md:mb-3">Questions</p>
@@ -674,11 +805,11 @@ function AssessmentPageInner() {
                 You&apos;ve answered {answeredCount} of {questions.length} questions. Are you sure?
               </p>
               <div className="flex gap-3">
-                <button onClick={() => setShowConfirm(false)} className="flex-1 px-4 py-2.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 text-sm font-medium transition-colors">
+                <button onClick={() => setShowConfirm(false)} disabled={phase === "submitting"} className="flex-1 px-4 py-2.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 text-sm font-medium transition-colors disabled:opacity-50">
                   Continue
                 </button>
-                <button onClick={handleSubmit} className="flex-1 btn-brand py-2.5 text-sm bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-medium">
-                  Submit Now
+                <button onClick={handleSubmit} disabled={phase === "submitting"} className="flex-1 btn-brand py-2.5 text-sm bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-medium disabled:opacity-50 flex items-center justify-center">
+                  {phase === "submitting" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Submit Now"}
                 </button>
               </div>
             </div>

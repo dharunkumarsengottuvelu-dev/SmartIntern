@@ -1,7 +1,31 @@
 import OpenAI from "openai";
-import { calculateATSScore, ATSInput } from "./ats";
+import { calculateATSScore, ATSInput, ATSResult } from "./ats";
 import fs from "fs";
 import path from "path";
+
+/** Reads MISTRAL_API_KEY from process.env or .env.local */
+function resolveMistralKey(): string | null {
+  let key = process.env.MISTRAL_API_KEY || null;
+  if (!key) {
+    try {
+      for (const name of [".env.local", ".env"]) {
+        const fullPath = path.join(/*turbopackIgnore: true*/ process.cwd(), name);
+        if (fs.existsSync(fullPath)) {
+          const content = fs.readFileSync(fullPath, "utf-8");
+          const m = content.match(/^MISTRAL_API_KEY\s*=\s*(.+)$/m);
+          if (m?.[1]) { key = m[1].replace(/["'\r]/g, "").trim(); break; }
+        }
+      }
+    } catch (_) {}
+  }
+  return key || null;
+}
+
+function getMistralClient(): OpenAI | null {
+  const key = resolveMistralKey();
+  if (!key) return null;
+  return new OpenAI({ apiKey: key, baseURL: "https://api.mistral.ai/v1" });
+}
 
 export function resolveAPIKey(): string {
   let key = process.env.XAI_API_KEY || process.env.GROK_API_KEY;
@@ -66,30 +90,86 @@ function getXAI(): OpenAI {
   });
 }
 
-// Try multiple xAI model names in order (newest first)
-const XAI_MODELS = ["grok-3-mini", "grok-3", "grok-2-1212", "grok-2", "grok-beta"];
+// Mistral free-tier models (tried first)
+const MISTRAL_MODELS = ["mistral-small-latest", "mistral-medium-latest", "open-mistral-7b"];
+// Valid xAI model names (fallback)
+const XAI_MODELS = ["grok-3-mini", "grok-3", "grok-2-vision-1212", "grok-vision-beta"];
 
-async function callXAI(messages: any[], temperature = 0.1, maxTokens = 3000): Promise<string> {
-  const client = getXAI();
-  for (const model of XAI_MODELS) {
-    try {
-      const response = await client.chat.completions.create({
-        model,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-      });
-      const content = response.choices[0]?.message?.content || "";
-      if (content) {
-        console.log(`[xAI] Success with model: ${model}`);
-        return content;
-      }
-    } catch (err: any) {
-      console.warn(`[xAI] Model ${model} failed: ${err?.message}`);
-    }
-  }
-  throw new Error("All xAI models failed");
+function classifyAPIError(err: any, provider = "AI"): string {
+  const msg: string = err?.message || "";
+  const status: number = err?.status || err?.statusCode || 0;
+  if (status === 401 || msg.toLowerCase().includes("invalid api key") || msg.toLowerCase().includes("unauthorized"))
+    return `${provider} Invalid API Key (HTTP 401) — check your key in .env.local`;
+  if (status === 403 || msg.toLowerCase().includes("credits") || msg.toLowerCase().includes("license") || msg.toLowerCase().includes("forbidden"))
+    return `${provider} access denied (HTTP 403) — no credits or insufficient permissions`;
+  if (status === 429 || msg.toLowerCase().includes("rate limit") || msg.toLowerCase().includes("too many requests"))
+    return `${provider} rate limit exceeded (HTTP 429) — please wait and retry`;
+  if (status === 400 && msg.toLowerCase().includes("model not found"))
+    return `${provider} model not found (HTTP 400) — model name may be invalid`;
+  if (status >= 500 && status < 600)
+    return `${provider} server error (HTTP ${status}) — temporary issue, please retry`;
+  if (msg.toLowerCase().includes("timeout") || msg.toLowerCase().includes("econnreset") || msg.toLowerCase().includes("econnrefused"))
+    return `${provider} network timeout or connection refused`;
+  return msg || `Unknown ${provider} error`;
 }
+
+// Keep legacy alias so all existing call sites below still compile
+const classifyXAIError = (err: any) => classifyAPIError(err, "xAI");
+
+/** Unified AI caller: tries Mistral (primary) → xAI (fallback) → throws with real errors */
+async function callAI(messages: any[], temperature = 0.1, maxTokens = 3000): Promise<string> {
+  const allErrors: string[] = [];
+
+  // ── 1. Mistral (primary — free tier) ──
+  const mistral = getMistralClient();
+  if (mistral) {
+    for (const model of MISTRAL_MODELS) {
+      try {
+        console.log(`[Mistral] Trying model: ${model}`);
+        const resp = await mistral.chat.completions.create({ model, messages, temperature, max_tokens: maxTokens });
+        const content = resp.choices[0]?.message?.content || "";
+        if (content) { console.log(`[Mistral] Success with: ${model}`); return content; }
+        console.warn(`[Mistral] ${model} returned empty content`);
+      } catch (err: any) {
+        const reason = classifyAPIError(err, "Mistral");
+        console.warn(`[Mistral] ${model} failed: ${reason}`);
+        allErrors.push(`Mistral/${model}: ${reason}`);
+        const status: number = err?.status || err?.statusCode || 0;
+        if (status === 401 || status === 403) { console.warn("[Mistral] Auth error — skipping remaining Mistral models"); break; }
+      }
+    }
+  } else {
+    console.warn("[Mistral] MISTRAL_API_KEY not configured — skipping Mistral.");
+  }
+
+  // ── 2. xAI (fallback) ──
+  try {
+    const xai = getXAI();
+    for (const model of XAI_MODELS) {
+      try {
+        console.log(`[xAI] Trying model: ${model}`);
+        const resp = await xai.chat.completions.create({ model, messages, temperature, max_tokens: maxTokens });
+        const content = resp.choices[0]?.message?.content || "";
+        if (content) { console.log(`[xAI] Success with: ${model}`); return content; }
+        console.warn(`[xAI] ${model} returned empty content`);
+      } catch (err: any) {
+        const reason = classifyAPIError(err, "xAI");
+        console.warn(`[xAI] ${model} failed: ${reason}`);
+        allErrors.push(`xAI/${model}: ${reason}`);
+        const status: number = err?.status || err?.statusCode || 0;
+        if (status === 401 || status === 403) { console.warn("[xAI] Auth error — skipping remaining xAI models"); break; }
+      }
+    }
+  } catch (xaiInitErr: any) {
+    allErrors.push(`xAI init: ${xaiInitErr?.message}`);
+  }
+
+  throw new Error(`All AI providers failed.\n${allErrors.join("\n")}`);
+}
+
+// Backward-compat alias — all existing callXAI() calls below now go through the unified callAI()
+const callXAI = callAI;
+
 
 async function callXAIResponses(input: string): Promise<string> {
   const key = resolveAPIKey();
@@ -161,13 +241,23 @@ export interface GrokResumeReview {
   weaknesses: string[];
   improvements: string[];
   extractedSkills: ExtractedSkills;
-  breakdown: {
+  breakdown: Partial<{
     skillsScore: number;
     projectsScore: number;
     educationScore: number;
     certificationsScore: number;
     formattingScore: number;
-  };
+    technicalSkills: number;
+    projects: number;
+    education: number;
+    certifications: number;
+    formatting: number;
+    contactInfo: number;
+    professionalSummary: number;
+    actionVerbs: number;
+    quantifiedAchievements: number;
+    softSkills: number;
+  }>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -745,171 +835,73 @@ function buildMCQsFromBank(skills: string[]): MCQQuestion[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Local ATS Analysis (rule-based fallback when AI fails)
+// Job Description Semantic Matching
 // ─────────────────────────────────────────────────────────────────────────────
-function buildLocalATSReview(rawText: string): GrokResumeReview {
-  const { programming, technical, tools, soft, certifications, allSkills } =
-    extractAllSkillsFromText(rawText);
-
-  // Extract projects
-  const projectMatches = rawText.match(/(?:project|built|developed|created|implemented)[^\n]{0,80}/gi) || [];
-  const projects = [...new Set(projectMatches.slice(0, 5).map(p => p.trim().substring(0, 60)))];
-
-  // Education
-  const eduPatterns = ["b\\.tech", "b\\.e\\.", "bca", "m\\.tech", "mca", "bachelor", "master", "mba", "bsc", "msc", "btech", "mtech"];
-  const education = [...new Set(
-    eduPatterns
-      .filter(e => new RegExp(e, "i").test(rawText))
-      .map(e => e.replace(/\\\./g, ".").toUpperCase())
-  )];
-
-  const atsInput: ATSInput = { technical, programming, tools, certifications, projects, education, soft, rawText };
-  const { atsScore, strengths, weaknesses, improvements, breakdown } = calculateATSScore(atsInput);
-
-  console.log("[Local ATS] Skills:", { programming: programming.length, technical: technical.length, tools: tools.length, total: allSkills.length });
-
-  return {
-    atsScore,
-    strengths: strengths.length > 0 ? strengths : ["Resume submitted for analysis"],
-    weaknesses: weaknesses.length > 0 ? weaknesses : ["Add more specific technical skills to improve ATS score"],
-    improvements,
-    extractedSkills: { technical, programming, tools, certifications, projects, education, soft, allSkills },
-    breakdown,
-  };
+export interface JDMatchResult {
+  matchScore: number;
+  matchedSkills: string[];
+  missingSkills: string[];
+  experienceMatch: string;
+  educationMatch: string;
+  cultureFit: string;
+  recommendations: string[];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Grok / xAI Resume Review (AI-powered)
-// ─────────────────────────────────────────────────────────────────────────────
-export async function reviewResumeWithGrok(text: string): Promise<GrokResumeReview> {
-  const resumeText = text.substring(0, 8000);
+export async function matchResumeToJob(resumeData: EnterpriseResumeData, jobDescription: string): Promise<JDMatchResult> {
+  const prompt = `You are a Senior Talent Acquisition Specialist at a top MNC.
+Your task is to semantically match the candidate's Enterprise Resume Data against the provided Job Description.
 
-  if (!resumeText || resumeText.trim().length < 50) {
-    console.warn("[ATS] Text too short, using local analysis");
-    return buildLocalATSReview(resumeText || "");
-  }
+Candidate Resume Data (JSON):
+${JSON.stringify(resumeData, null, 2)}
 
-  const prompt = `You are an expert ATS (Applicant Tracking System) reviewer at a top MNC (Google, Amazon, Microsoft).
+Job Description:
+${jobDescription}
 
-Evaluate the following resume and return ONLY a valid JSON object.
-
-Resume:
-${resumeText}
-
-Return this exact JSON structure (no markdown, no extra text):
+Return a detailed matching analysis strictly in this JSON format (NO MARKDOWN, NO OTHER TEXT):
 {
-  "atsScore": 75,
-  "strengths": ["Specific strength 1", "Specific strength 2", "Specific strength 3"],
-  "weaknesses": ["Specific weakness 1", "Specific weakness 2"],
-  "improvements": ["Specific improvement 1", "Specific improvement 2", "Specific improvement 3"],
-  "extractedSkills": {
-    "technical": ["React", "Next.js", "Node.js"],
-    "programming": ["JavaScript", "Python", "TypeScript"],
-    "tools": ["Git", "Docker", "PostgreSQL"],
-    "certifications": ["AWS Certified Cloud Practitioner"],
-    "projects": ["E-commerce Platform", "ML Dashboard"],
-    "education": ["B.Tech Computer Science - VIT University 2024"],
-    "soft": ["Leadership", "Communication", "Agile"]
-  },
-  "breakdown": {
-    "skillsScore": 25,
-    "projectsScore": 18,
-    "educationScore": 15,
-    "certificationsScore": 8,
-    "formattingScore": 9
-  }
+  "matchScore": 85, // 0-100 percentage based on skills, experience, and education
+  "matchedSkills": ["React", "TypeScript", "Agile"], // Skills present in both
+  "missingSkills": ["Docker", "GraphQL"], // Skills required by JD but missing in resume
+  "experienceMatch": "Detailed explanation of how candidate's experience aligns or falls short.",
+  "educationMatch": "Explanation of education alignment.",
+  "cultureFit": "Analysis of soft skills and cultural fit based on the JD.",
+  "recommendations": ["Actionable step 1", "Actionable step 2"] // How to improve for this specific job
 }
+`;
 
-RULES:
-1. atsScore = sum of all breakdown values (max 100).
-2. Max values: skillsScore=35, projectsScore=25, educationScore=20, certificationsScore=10, formattingScore=10.
-3. Extract ALL skills, frameworks, languages, and tools from the resume text.
-4. Be specific and harsh like a real MNC recruiter.
-5. Return ONLY raw JSON — NO markdown fences.`;
+  try {
+    const content = await callXAI([
+      { role: "system", content: "You are an expert technical recruiter and semantic matching engine. Output ONLY valid JSON." },
+      { role: "user", content: prompt }
+    ], 0.1, 3000);
 
-  const parseResponse = (content: string): GrokResumeReview => {
     const cleaned = content.replace(/```json\s*/gi, "").replace(/```\s*/gi, "").trim();
     const jsonStart = cleaned.indexOf("{");
     const jsonEnd = cleaned.lastIndexOf("}");
     if (jsonStart === -1 || jsonEnd === -1) throw new Error("No JSON object in response");
 
     const parsed = JSON.parse(cleaned.substring(jsonStart, jsonEnd + 1));
-    const ex = parsed.extractedSkills || {};
-
-    const allSkills = [...new Set([
-      ...(ex.technical || []),
-      ...(ex.programming || []),
-      ...(ex.tools || []),
-    ])] as string[];
-
-    const breakdown = {
-      skillsScore: Math.min(parsed.breakdown?.skillsScore ?? 10, 35),
-      projectsScore: Math.min(parsed.breakdown?.projectsScore ?? 10, 25),
-      educationScore: Math.min(parsed.breakdown?.educationScore ?? 10, 20),
-      certificationsScore: Math.min(parsed.breakdown?.certificationsScore ?? 5, 10),
-      formattingScore: Math.min(parsed.breakdown?.formattingScore ?? 5, 10),
-    };
-    const atsScore = Math.min(
-      breakdown.skillsScore + breakdown.projectsScore +
-      breakdown.educationScore + breakdown.certificationsScore + breakdown.formattingScore,
-      100
-    );
-
     return {
-      atsScore,
-      strengths: Array.isArray(parsed.strengths) && parsed.strengths.length > 0
-        ? parsed.strengths : ["Resume successfully analyzed"],
-      weaknesses: Array.isArray(parsed.weaknesses) && parsed.weaknesses.length > 0
-        ? parsed.weaknesses : ["Consider adding more quantifiable achievements"],
-      improvements: Array.isArray(parsed.improvements) && parsed.improvements.length > 0
-        ? parsed.improvements : ["Add measurable impact to projects"],
-      extractedSkills: {
-        technical: ex.technical || [],
-        programming: ex.programming || [],
-        tools: ex.tools || [],
-        certifications: ex.certifications || [],
-        projects: ex.projects || [],
-        education: ex.education || [],
-        soft: ex.soft || [],
-        allSkills,
-      },
-      breakdown,
+      matchScore: parsed.matchScore || 0,
+      matchedSkills: parsed.matchedSkills || [],
+      missingSkills: parsed.missingSkills || [],
+      experienceMatch: parsed.experienceMatch || "Not assessed.",
+      educationMatch: parsed.educationMatch || "Not assessed.",
+      cultureFit: parsed.cultureFit || "Not assessed.",
+      recommendations: parsed.recommendations || []
     };
-  };
-
-  try {
-    console.log("[ATS] Calling xAI API...");
-    const content = await callXAI([
-      { role: "system", content: "You are an expert ATS resume analyzer. Return ONLY valid JSON, no markdown." },
-      { role: "user", content: prompt },
-    ], 0.1, 2000);
-
-    const result = parseResponse(content);
-    console.log("[ATS] AI Score:", result.atsScore, "| Skills:", result.extractedSkills.allSkills.length);
-
-    // If AI returned empty skills, supplement with local extraction
-    if (result.extractedSkills.allSkills.length === 0) {
-      console.warn("[ATS] AI returned 0 skills, supplementing with local extractor");
-      const local = extractAllSkillsFromText(resumeText);
-      result.extractedSkills = {
-        ...result.extractedSkills,
-        technical: local.technical.length > 0 ? local.technical : result.extractedSkills.technical,
-        programming: local.programming.length > 0 ? local.programming : result.extractedSkills.programming,
-        tools: local.tools.length > 0 ? local.tools : result.extractedSkills.tools,
-        allSkills: local.allSkills,
-      };
-    }
-
-    return result;
   } catch (error: any) {
-    console.error("[ATS] xAI failed, using local analysis:", error?.message);
-    return buildLocalATSReview(resumeText);
+    console.error("[ATS] Semantic matching failed:", error);
+    return {
+      matchScore: 0,
+      matchedSkills: [],
+      missingSkills: [],
+      experienceMatch: "Failed to run semantic matching engine.",
+      educationMatch: "Failed to run semantic matching engine.",
+      cultureFit: "Failed to run semantic matching engine.",
+      recommendations: ["Please try again later."]
+    };
   }
-}
-
-export async function extractSkillsFromResume(text: string): Promise<ExtractedSkills> {
-  const result = await reviewResumeWithGrok(text);
-  return result.extractedSkills;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1017,6 +1009,288 @@ Return ONLY this exact JSON (no markdown, no extra text):
   } catch (error: any) {
     console.warn("[MCQ] xAI failed, using curated bank:", error?.message);
     return buildMCQsFromBank(skills);
+  }
+}
+
+import { EnterpriseResumeData } from "./types";
+
+export async function parseResumeEnterprise(rawText: string): Promise<EnterpriseResumeData> {
+  const prompt = `You are a Principal AI Recruiter and Data Extraction Specialist. 
+Your task is to parse the provided raw resume OCR text and extract EVERY piece of information into a highly structured JSON format matching the schema below exactly.
+
+CRITICAL RULES:
+1. DO NOT hallucinate. If a field is missing in the resume, return an empty string "" or empty array [] or null/false as appropriate.
+2. Return ONLY valid JSON. No markdown, no introductory text.
+3. Extract all available metrics, KPIs, tools, frameworks, and dates.
+4. Extract every single programming language, framework, database, and cloud tool into the appropriate technicalSkills arrays.
+
+SCHEMA TO FOLLOW:
+{
+  "personalInfo": {
+    "fullName": "...", "firstName": "...", "lastName": "...",
+    "email": "...", "phone": "...", "linkedin": "...", "github": "..."
+    // ... plus any other personal info found (city, state, portfolio, etc.)
+  },
+  "education": [
+    {
+      "school": "...", "degreeType": "Bachelor|Master|...", "degreeName": "...",
+      "startDate": "...", "endDate": "...", "cgpa": 0.0,
+      "honors": [], "relevantCoursework": []
+    }
+  ],
+  "workExperience": [
+    {
+      "companyName": "...", "isCurrentCompany": true/false, "jobTitle": "...",
+      "employmentType": "Full-time|Internship|...", "location": "...",
+      "startDate": "...", "endDate": "...", 
+      "responsibilities": ["..."], "achievements": ["..."],
+      "kpis": ["..."], "technologiesUsed": ["..."]
+    }
+  ],
+  "projects": [
+    {
+      "projectName": "...", "projectType": "...", "description": "...",
+      "programmingLanguages": [], "frameworks": [], "databases": [],
+      "responsibilities": [], "githubUrl": "..."
+    }
+  ],
+  "technicalSkills": {
+    "programmingLanguages": [], "frameworks": [], "libraries": [], "sdks": [],
+    "databases": { "sql": [], "nosql": [], "orm": [] },
+    "backend": [], "frontend": [], "mobileDevelopment": [], "desktopDevelopment": [],
+    "gameDevelopment": [], "operatingSystems": [], "cloudPlatforms": [],
+    "devops": { "containers": [], "iac": [], "ciCd": [], "versionControl": [], "monitoring": [] },
+    "apisAndMicroservices": [], "bigDataAndDataWarehousing": [],
+    "machineLearningAndAI": [], "cyberSecurity": [], "networking": [], "other": []
+  },
+  "softSkills": [],
+  "certifications": [
+    { "certificationName": "...", "provider": "...", "issueDate": "..." }
+  ],
+  "achievements": [],
+  "languages": []
+}
+
+RAW RESUME TEXT:
+"""
+${rawText}
+"""
+`;
+
+  console.log("[ATS] Calling xAI to extract EnterpriseResumeData...");
+  let content = "";
+  try {
+    content = await callXAI([
+      { role: "system", content: "You are an expert data extractor. Output ONLY valid JSON matching the exact schema." },
+      { role: "user", content: prompt }
+    ], 0.1, 8000);
+  } catch (err: any) {
+    const reason = err?.message || "Unknown xAI error";
+    console.error("[ATS] xAI Enterprise extraction failed:", reason);
+    console.warn("[ATS] Falling back to heuristic-only resume parser (no AI credits required)...");
+
+    // ── Heuristic fallback: build EnterpriseResumeData from regex/keyword extraction ──
+    const skills = extractAllSkillsFromText(rawText);
+
+    // Extract basic personal info via regex
+    const emailMatch = rawText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
+    const phoneMatch = rawText.match(/(\+?\d[\d\-\s().]{7,}\d)/);
+    const linkedinMatch = rawText.match(/linkedin\.com\/in\/([\w\-]+)/i);
+    const githubMatch = rawText.match(/github\.com\/([\w\-]+)/i);
+    const nameMatch = rawText.split("\n").find(l => l.trim().length > 2 && l.trim().length < 60 && !/[@:/\\]/.test(l) && !/^(summary|education|skill|experience|project|contact|objective)/i.test(l.trim()));
+
+    // Detect projects (lines containing common project-section keywords)
+    const projectLines = rawText.split("\n").filter(l => /project|built|developed|created|implemented/i.test(l) && l.trim().length > 15);
+    const heuristicProjects = projectLines.slice(0, 5).map((l, i) => ({
+      projectName: `Project ${i + 1}`,
+      projectType: "Personal",
+      description: l.trim().slice(0, 200),
+      programmingLanguages: skills.programming.slice(0, 3),
+      frameworks: skills.technical.slice(0, 2),
+      databases: [],
+      responsibilities: [],
+      githubUrl: "",
+    }));
+
+    // Detect education
+    const hasBachelor = /bachelor|b\.?tech|b\.?e\.?|b\.sc|undergraduate/i.test(rawText);
+    const hasMaster = /master|m\.?tech|m\.?e\.?|m\.sc|postgraduate|mba/i.test(rawText);
+    const cgpaMatch = rawText.match(/(?:cgpa|gpa|grade)[:\s]*([0-9.]+)/i);
+
+    const heuristicEducation = [{
+      school: "",
+      degreeType: hasMaster ? "Master" : hasBachelor ? "Bachelor" : "Other",
+      degreeName: "",
+      startDate: "",
+      endDate: "",
+      cgpa: cgpaMatch ? parseFloat(cgpaMatch[1]) : 0,
+      honors: [] as string[],
+      relevantCoursework: [] as string[],
+    }];
+
+    const fallbackData: EnterpriseResumeData = {
+      personalInfo: {
+        fullName: nameMatch?.trim() || "",
+        firstName: "",
+        lastName: "",
+        email: emailMatch?.[0] || "",
+        phone: phoneMatch?.[1] || "",
+        linkedin: linkedinMatch ? `linkedin.com/in/${linkedinMatch[1]}` : "",
+        github: githubMatch ? `github.com/${githubMatch[1]}` : "",
+      },
+      education: heuristicEducation,
+      workExperience: [],
+      projects: heuristicProjects,
+      technicalSkills: {
+        programmingLanguages: skills.programming,
+        frameworks: skills.technical,
+        libraries: [],
+        sdks: [],
+        databases: { sql: skills.tools.filter(t => /sql|postgres|mysql|sqlite/.test(t.toLowerCase())), nosql: skills.tools.filter(t => /mongo|redis|cassandra|dynamo|firebase/.test(t.toLowerCase())), orm: [] },
+        backend: skills.technical.filter(t => /node|express|django|flask|fastapi|spring|nest|laravel/.test(t.toLowerCase())),
+        frontend: skills.technical.filter(t => /react|angular|vue|next|svelte|tailwind|bootstrap/.test(t.toLowerCase())),
+        mobileDevelopment: skills.technical.filter(t => /flutter|react native|android|ios|kotlin|swift/.test(t.toLowerCase())),
+        desktopDevelopment: [],
+        gameDevelopment: [],
+        operatingSystems: skills.tools.filter(t => /linux|ubuntu|windows|macos/.test(t.toLowerCase())),
+        cloudPlatforms: skills.tools.filter(t => /aws|gcp|azure|vercel|netlify|heroku/.test(t.toLowerCase())),
+        devops: {
+          containers: skills.tools.filter(t => /docker|kubernetes|k8s/.test(t.toLowerCase())),
+          iac: skills.tools.filter(t => /terraform|ansible|pulumi/.test(t.toLowerCase())),
+          ciCd: skills.tools.filter(t => /jenkins|github actions|gitlab ci|ci\/cd/.test(t.toLowerCase())),
+          versionControl: skills.tools.filter(t => /git|github|gitlab|bitbucket/.test(t.toLowerCase())),
+          monitoring: [],
+        },
+        apisAndMicroservices: skills.technical.filter(t => /graphql|rest|grpc|websocket/.test(t.toLowerCase())),
+        bigDataAndDataWarehousing: [],
+        machineLearningAndAI: skills.technical.filter(t => /machine learning|deep learning|tensorflow|pytorch|scikit|keras|nlp|langchain/.test(t.toLowerCase())),
+        cyberSecurity: [],
+        networking: [],
+        other: skills.tools,
+      },
+      softSkills: skills.soft,
+      certifications: skills.certifications.map(c => ({ certificationName: c, provider: "", issueDate: "" })),
+      achievements: [],
+      languages: [],
+      _heuristicFallback: true,
+      _fallbackReason: reason,
+    } as any;
+
+    return fallbackData;
+  }
+
+  const cleaned = content.replace(/```json\s*/gi, "").replace(/```\s*/gi, "").trim();
+  const jsonStart = cleaned.indexOf("{");
+  const jsonEnd = cleaned.lastIndexOf("}");
+  
+  if (jsonStart === -1 || jsonEnd === -1) {
+    throw new Error("Enterprise parsing failed: No JSON found in response");
+  }
+
+  try {
+    const parsed = JSON.parse(cleaned.substring(jsonStart, jsonEnd + 1)) as EnterpriseResumeData;
+    return parsed;
+  } catch (err) {
+    console.error("[ATS] JSON parse error:", err);
+    throw new Error("Enterprise parsing failed: Invalid JSON format");
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Grok API ATS Review
+// ─────────────────────────────────────────────────────────────────────────────
+export async function generateATSReviewGrok(rawText: string, parsedData: EnterpriseResumeData): Promise<ATSResult> {
+  const prompt = `You are an elite, highly critical Technical Recruiter and ATS System evaluating a candidate's resume for a top-tier tech company.
+You are provided with the raw resume text and the structured JSON data extracted from it.
+
+Your task is to evaluate the resume across 10 dimensions and return a highly detailed, honest, and critical ATS JSON report.
+Be extremely realistic. Do NOT inflate scores. 
+- A score of 90+ should be exceptionally rare (FAANG level).
+- A score of 60-75 is average.
+- A score below 50 means significant flaws.
+
+DIMENSIONS:
+1. technicalSkills (out of 25): Breadth, depth, and relevance to modern stacks (Cloud, DevOps, AI, etc.)
+2. projects (out of 20): Complexity, deployment, measurable impact, and real-world applicability.
+3. education (out of 10): Degrees, relevant coursework, and academic prestige/GPA (if provided).
+4. certifications (out of 8): Industry-recognized certifications (e.g., AWS, GCP, specialized courses).
+5. formatting (out of 7): Readability, sections, bullet points, and appropriate length.
+6. contactInfo (out of 7): Email, phone, LinkedIn, GitHub/Portfolio.
+7. professionalSummary (out of 6): Clear, impactful, role-targeted summary or objective.
+8. actionVerbs (out of 7): Strong, active verbs (Architected, Spearheaded, Optimized) vs weak passive verbs.
+9. quantifiedAchievements (out of 5): Use of numbers, percentages, and metrics to prove impact.
+10. softSkills (out of 5): Communication, leadership, teamwork mentioned explicitly or implicitly.
+
+CRITICAL RULES:
+1. Return ONLY valid JSON matching the exact schema below.
+2. DO NOT output markdown blocks or explanation text outside the JSON.
+3. Keep the arrays strictly limited (e.g. 5-7 strengths, 3-5 weaknesses).
+4. Provide actionable, specific improvements.
+5. Provide realistic "hiringProbability" ("Very Low", "Low", "Medium", "High", "Very High").
+6. Provide a concise "recruiterImpression" (1-2 sentences).
+
+EXPECTED JSON SCHEMA:
+{
+  "atsScore": 0,
+  "breakdown": {
+    "technicalSkills": 0, "projects": 0, "education": 0, "certifications": 0, "formatting": 0,
+    "contactInfo": 0, "professionalSummary": 0, "actionVerbs": 0, "quantifiedAchievements": 0, "softSkills": 0
+  },
+  "strengths": ["...", "..."],
+  "weaknesses": ["...", "..."],
+  "improvements": ["...", "..."],
+  "missingKeywords": ["...", "..."],
+  "missingSkills": ["...", "..."],
+  "hiringProbability": "Medium",
+  "recruiterImpression": "...",
+  "readabilityScore": 0,
+  "professionalismScore": 0,
+  "keywordDensity": 0,
+  "detectedDomain": "Software Engineering",
+  "possibleRoles": ["...", "..."]
+}
+
+RAW RESUME TEXT:
+"""
+${rawText.slice(0, 5000)}
+"""
+
+PARSED RESUME DATA:
+"""
+${JSON.stringify(parsedData)}
+"""
+`;
+
+  console.log("[ATS] Calling xAI to generate ATS Review...");
+  let content = "";
+  try {
+    content = await callXAI([
+      { role: "system", content: "You are an elite ATS System. Return ONLY valid JSON matching the exact expected schema without markdown formatting." },
+      { role: "user", content: prompt }
+    ], 0.2, 5000);
+  } catch (err: any) {
+    console.error("[ATS] xAI ATS Review failed:", err?.message);
+    throw new Error("Failed to generate ATS review: " + err?.message);
+  }
+
+  const cleaned = content.replace(/```json\s*/gi, "").replace(/```\s*/gi, "").trim();
+  const jsonStart = cleaned.indexOf("{");
+  const jsonEnd = cleaned.lastIndexOf("}");
+  
+  if (jsonStart === -1 || jsonEnd === -1) {
+    throw new Error("ATS Review failed: No JSON found in response");
+  }
+
+  try {
+    const parsed = JSON.parse(cleaned.substring(jsonStart, jsonEnd + 1)) as ATSResult;
+    // Safety check: ensure breakdown sums up close to atsScore (or re-compute if wildly off)
+    const rawSum = Object.values(parsed.breakdown).reduce((a, b) => (a as number) + (b as number), 0);
+    parsed.atsScore = Math.min(Math.max(Math.round(rawSum as number), 20), 99); 
+    
+    return parsed;
+  } catch (err) {
+    console.error("[ATS] ATS Review JSON parse error:", err);
+    throw new Error("ATS Review failed: Invalid JSON format");
   }
 }
 

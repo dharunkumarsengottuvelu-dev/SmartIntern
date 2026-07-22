@@ -1,4 +1,5 @@
 import { getSupabase } from "@/lib/supabase";
+import { EnterpriseResumeData } from "@/lib/types";
 
 export interface DbResume {
   id: string;
@@ -6,15 +7,7 @@ export interface DbResume {
   file_url: string;
   file_name: string;
   raw_text?: string;
-  extracted_skills: {
-    technical: string[];
-    programming: string[];
-    tools: string[];
-    certifications: string[];
-    projects: string[];
-    education: string[];
-    soft: string[];
-  };
+  extracted_skills: EnterpriseResumeData;
   ats_score: number;
   strengths: string[];
   weaknesses: string[];
@@ -54,7 +47,7 @@ export async function createResume(input: {
   file_url: string;
   file_name: string;
   raw_text?: string;
-  extracted_skills: object;
+  extracted_skills: EnterpriseResumeData;
   ats_score: number;
   strengths: string[];
   weaknesses: string[];

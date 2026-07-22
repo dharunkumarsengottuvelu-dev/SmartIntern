@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getActiveInternships } from "@/lib/db/internships";
 import { auth } from "@/lib/auth";
+import { apiError } from "@/lib/api-response";
 
 export async function GET(request: NextRequest) {
   try {
@@ -12,6 +13,6 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ internships, total, page, limit });
   } catch (error) {
-    return NextResponse.json({ error: "Failed to fetch internships" }, { status: 500 });
+    return apiError("Fetch Failed", "Failed to fetch internships", error, 500);
   }
 }

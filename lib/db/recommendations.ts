@@ -33,16 +33,11 @@ export async function upsertRecommendation(input: {
   matched_skills: string[];
 }): Promise<void> {
   const sb = getSupabase();
-  // First delete any existing recommendation for this user/internship pair
-  await sb.from("recommendations")
-    .delete()
-    .eq("user_id", input.user_id)
-    .eq("internship_id", input.internship_id);
-
-  // Then insert the new recommendation
-  const { error } = await sb.from("recommendations").insert({
+  const { error } = await sb.from("recommendations").upsert({
     ...input,
     updated_at: new Date().toISOString(),
+  }, {
+    onConflict: 'user_id,internship_id'
   });
   
   if (error) throw error;

@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { getLatestAssessmentByUser } from "@/lib/db/assessments";
+import { apiError } from "@/lib/api-response";
 
 export async function GET(request: NextRequest) {
   try {
     const session = await auth();
-    if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!session?.user?.id) return apiError("Unauthorized", "No active session found", "Please log in.", 401);
 
     const assessment = await getLatestAssessmentByUser(session.user.id as string);
     if (!assessment) return NextResponse.json({ assessment: null });
@@ -36,7 +37,8 @@ export async function GET(request: NextRequest) {
       }
     });
 
-  } catch {
-    return NextResponse.json({ error: "Failed" }, { status: 500 });
+  } catch (error) {
+    console.error("Assessment fetch error:", error);
+    return apiError("Assessment fetch failed", "Failed to retrieve the assessment data", error, 500);
   }
 }

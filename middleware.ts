@@ -6,10 +6,16 @@ import { NextResponse } from "next/server";
 const { auth } = NextAuth(authConfig);
 
 export default auth(async (req) => {
+  const { pathname } = req.nextUrl;
+
+  // Never intercept NextAuth's own API routes — let them respond as JSON
+  if (pathname.startsWith("/api/auth")) {
+    return NextResponse.next();
+  }
+
   // Update Supabase session cookies
   const response = await updateSession(req);
 
-  const { pathname } = req.nextUrl;
   const session = req.auth;
   
   // Extract role from session safely
@@ -48,6 +54,12 @@ export default auth(async (req) => {
 
 export const config = {
   matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|public).*)",
+    /*
+     * Match all paths EXCEPT:
+     * - /api/* (all API routes — NextAuth, upload, etc.)
+     * - /_next/static, /_next/image (Next.js internals)
+     * - /favicon.ico, /public (static assets)
+     */
+    "/((?!api/|_next/static|_next/image|favicon.ico|public/).*)",
   ],
 };

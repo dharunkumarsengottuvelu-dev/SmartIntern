@@ -4,6 +4,7 @@ import { countStudents } from "@/lib/db/users";
 import { countResumes, getAvgATSScore } from "@/lib/db/resumes";
 import { countCompletedAssessments, getAvgAssessmentScore } from "@/lib/db/assessments";
 import { countRecommendations } from "@/lib/db/recommendations";
+import { apiError } from "@/lib/api-response";
 
 async function requireAdmin() {
   const session = await auth();
@@ -14,7 +15,7 @@ async function requireAdmin() {
 
 export async function GET(request: NextRequest) {
   const session = await requireAdmin();
-  if (!session) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  if (!session) return apiError("Forbidden", "Admin access required", undefined, 403);
 
   try {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -47,6 +48,6 @@ export async function GET(request: NextRequest) {
       avgAssessmentScore,
     });
   } catch (error) {
-    return NextResponse.json({ error: "Failed to fetch stats" }, { status: 500 });
+    return apiError("Fetch Failed", "Failed to fetch stats", error, 500);
   }
 }

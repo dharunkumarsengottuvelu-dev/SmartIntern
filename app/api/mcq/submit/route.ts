@@ -5,27 +5,28 @@ import { getResumeById } from "@/lib/db/resumes";
 import { getActiveInternships } from "@/lib/db/internships";
 import { upsertRecommendation } from "@/lib/db/recommendations";
 import { rankInternships } from "@/lib/recommendation";
+import { apiError } from "@/lib/api-response";
 
 export async function POST(request: NextRequest) {
   try {
     const session = await auth();
     if (!session?.user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return apiError("Unauthorized", "No active session found", "Please log in to submit your assessment.", 401);
     }
 
     const userId = session.user.id as string;
     const { assessmentId, answers } = await request.json();
     if (!assessmentId || !Array.isArray(answers)) {
-      return NextResponse.json({ error: "Invalid submission data" }, { status: 400 });
+      return apiError("Invalid Request", "Invalid submission data", "Missing assessmentId or answers array.", 400);
     }
 
     const assessment = await getAssessmentById(assessmentId, userId);
     if (!assessment) {
-      return NextResponse.json({ error: "Assessment not found" }, { status: 404 });
+      return apiError("Not Found", "Assessment not found", "Could not locate the requested assessment.", 404);
     }
 
     if (assessment.status === "completed") {
-      return NextResponse.json({ error: "Assessment already submitted" }, { status: 400 });
+      return apiError("Already Submitted", "Assessment already submitted", "You cannot submit an assessment more than once.", 400);
     }
 
     // Score the answers
@@ -119,6 +120,6 @@ export async function POST(request: NextRequest) {
     });
   } catch (error: any) {
     console.error("MCQ submit error:", error);
-    return NextResponse.json({ error: error.message || "Failed to submit assessment" }, { status: 500 });
+    return apiError("Submission Failed", "Failed to submit assessment", error, 500);
   }
 }

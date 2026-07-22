@@ -5,6 +5,7 @@ import { getResumeByUser } from "@/lib/db/resumes";
 import { getLatestAssessmentByUser } from "@/lib/db/assessments";
 import { getActiveInternships } from "@/lib/db/internships";
 import { rankInternships } from "@/lib/recommendation";
+import { apiError } from "@/lib/api-response";
 
 async function generateAndGetRecommendations(userId: string) {
   // Fetch student data and all active internships in parallel
@@ -65,7 +66,7 @@ async function generateAndGetRecommendations(userId: string) {
 export async function GET(request: NextRequest) {
   try {
     const session = await auth();
-    if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    if (!session?.user) return apiError("Unauthorized", "No active session found", "Please log in.", 401);
     const userId = session.user.id as string;
 
     let recommendations = await getRecommendationsByUser(userId);
@@ -113,10 +114,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ recommendations: mappedRecommendations });
   } catch (error: any) {
     console.error("Recommendations GET error:", error);
-    return NextResponse.json(
-      { success: false, message: "Failed to fetch recommendations", reason: error.message, stack: error.stack },
-      { status: 500 }
-    );
+    return apiError("Recommendations fetch failed", "Failed to fetch recommendations", error, 500);
   }
 }
 
@@ -129,7 +127,7 @@ export async function POST(request: NextRequest) {
   try {
     const session = await auth();
     if (!session?.user) {
-      return NextResponse.json({ success: false, message: "Unauthorized", reason: "No session found", stack: "" }, { status: 401 });
+      return apiError("Unauthorized", "No active session found", "Please log in.", 401);
     }
     const userId = session.user.id as string;
 
@@ -158,9 +156,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ recommendations: mapped, generated: fresh.length });
   } catch (error: any) {
     console.error("Recommendation generation error:", error);
-    return NextResponse.json(
-      { success: false, message: "Failed to generate recommendations", reason: error.message, stack: error.stack },
-      { status: 500 }
-    );
+    return apiError("Recommendation generation failed", "Failed to generate recommendations", error, 500);
   }
 }

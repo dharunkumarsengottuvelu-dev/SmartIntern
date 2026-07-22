@@ -6,21 +6,36 @@ import { getActiveInternships } from "@/lib/db/internships";
 import { upsertRecommendation } from "@/lib/db/recommendations";
 import { rankInternships } from "@/lib/recommendation";
 import { StructuredLogger } from "@/lib/logger";
+import { extractText } from "unpdf";
+import mammoth from "mammoth";
+import { apiError } from "@/lib/api-response";
 
-let AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8000";
-
-function getResolvedAiServiceUrl() {
-  try {
-    const fs = require('fs');
-    const isDocker = fs.existsSync('/.dockerenv');
-    let url = process.env.AI_SERVICE_URL || "http://localhost:8000";
-    if (!isDocker && url.includes("ai-service")) {
-      url = url.replace("ai-service", "127.0.0.1");
+// ─────────────────────────────────────────────────────────────
+// Extract Text from Uploaded File (PDF / DOCX)
+// ─────────────────────────────────────────────────────────────
+async function extractTextFromFile(buffer: Buffer, fileName: string): Promise<string> {
+  let rawText = "";
+  if (fileName.match(/\.pdf$/i)) {
+    try {
+      const result = await extractText(new Uint8Array(buffer), { mergePages: true });
+      rawText = Array.isArray(result.text) ? result.text.join("\n") : (result.text || "");
+    } catch (e) {
+      console.warn("PDF parsing failed:", e);
     }
-    return url;
-  } catch (e) {
-    return AI_SERVICE_URL;
+  } else if (fileName.match(/\.(docx|doc)$/i)) {
+    try {
+      const result = await mammoth.extractRawText({ buffer });
+      rawText = result.value || "";
+    } catch (e) {
+      console.warn("DOCX parsing failed:", e);
+    }
   }
+  
+  if (!rawText.trim()) {
+    throw new Error("Unable to extract any text. The file might be corrupted or empty.");
+  }
+  
+  return rawText;
 }
 
 export async function POST(request: NextRequest) {
@@ -29,37 +44,32 @@ export async function POST(request: NextRequest) {
   logger.info("Request Initialization", "Request received");
 
   let userId: string = "";
-  
+
   // =================================================
-  // STEP 12: Check environment variables.
+  // Check environment variables
   // =================================================
   try {
-    logger.debug("Environment Check", "Checking environment variables");
     if (!process.env.NEXT_PUBLIC_SUPABASE_URL) throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL");
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY");
   } catch (envErr: any) {
     logger.error("Environment Check", "Validation failed", envErr);
-    return NextResponse.json({
-      success: false, stage: "Environment Check", reason: envErr.message, solution: "Check .env file"
-    }, { status: 500 });
+    return apiError("Server Configuration Error", "Missing required environment variables", envErr, 500);
   }
 
   // =================================================
   // Auth Check
   // =================================================
   try {
-    logger.debug("Authentication", "Checking authentication");
     const session = await auth();
     if (!session?.user) {
-      logger.warn("Authentication", "No active session found");
-      return NextResponse.json({ success: false, stage: "Authentication", reason: "Unauthorized", solution: "Please log in." }, { status: 401 });
+      return apiError("Unauthorized", "No active session found", "Please log in to upload a resume.", 401);
     }
     userId = session.user.id as string;
     logger.userId = userId;
     logger.info("Authentication", "User authenticated");
   } catch (authErr: any) {
     logger.error("Authentication", "Error checking session", authErr);
-    return NextResponse.json({ success: false, stage: "Authentication", reason: authErr.message, solution: "Check auth provider configuration." }, { status: 500 });
+    return apiError("Authentication Failed", "Unable to verify user session", authErr, 500);
   }
 
   let formData: FormData;
@@ -67,47 +77,56 @@ export async function POST(request: NextRequest) {
   let buffer: Buffer;
 
   // =================================================
-  // STEP 4 & 5: Validate incoming request & Verify file upload
+  // Validate incoming request & file
   // =================================================
   try {
-    logger.debug("FormData", "Parsing FormData");
     formData = await request.formData();
-    logger.info("FormData", "FormData parsed");
+  } catch (err: any) {
+    return apiError("Bad Request", "Failed to parse form data", err, 400);
+  }
 
-    const uploadedFile = formData.get("resume") as File | null;
-    if (!uploadedFile) {
-      throw new Error("No file uploaded");
-    }
-    file = uploadedFile;
-    logger.fileName = file.name;
-    logger.info("File Validation", "File found");
+  const uploadedFile = formData.get("resume") as File | null;
+  if (!uploadedFile) {
+    return apiError("Missing File", "No file was uploaded.", null, 400);
+  }
+  
+  file = uploadedFile;
+  logger.fileName = file.name;
 
-    if (file.size === 0) {
-      throw new Error("Empty file uploaded");
-    }
-    if (file.size > 10 * 1024 * 1024) {
-      throw new Error("File exceeds 10MB limit");
-    }
-    
-    const allowedTypes = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"];
-    if (!allowedTypes.includes(file.type) && !file.name.match(/\.(pdf|docx|doc)$/i)) {
-      throw new Error("Unsupported file extension. Only PDF and DOCX are allowed.");
-    }
-    
-    logger.info("File Validation", "File validated");
+  if (file.size === 0) {
+    return apiError("Empty File", "The uploaded file is empty.", null, 400);
+  }
+  
+  if (file.size > 10 * 1024 * 1024) {
+    return apiError("File Too Large", "The file exceeds the 10MB limit.", null, 413);
+  }
 
+  const allowedTypes = [
+    "application/pdf", 
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
+    "application/msword"
+  ];
+  
+  if (!allowedTypes.includes(file.type) && !file.name.match(/\.(pdf|docx|doc)$/i)) {
+    return apiError("Unsupported Format", "Only PDF and DOCX files are allowed.", null, 415);
+  }
+
+  // Note: Duplicate file names will simply overwrite the existing database record 
+  // via the upsert logic in createResume, matching standard product behavior.
+
+  try {
     const bytes = await file.arrayBuffer();
     buffer = Buffer.from(bytes);
+    logger.info("File Validation", "File validated");
   } catch (fileErr: any) {
-    logger.warn("File Validation", "Validation failed", fileErr);
-    return NextResponse.json({ success: false, stage: "File Validation", reason: fileErr.message, solution: "Attach a valid PDF or DOCX file under 10MB." }, { status: 400 });
+    return apiError("File Validation Error", "An error occurred while reading the file", fileErr, 500);
   }
 
   let fileUrl = "";
   let safeFileName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_");
 
   // =================================================
-  // Database / Storage Upload
+  // Storage Upload
   // =================================================
   try {
     logger.info("Storage", "Saving to Supabase storage");
@@ -119,7 +138,8 @@ export async function POST(request: NextRequest) {
       .upload(filePath, buffer, { contentType: file.type || "application/pdf", upsert: true });
 
     if (uploadError) {
-      logger.warn("Storage", "Supabase storage failed, falling back to local FS", uploadError);
+      logger.warn("Storage", "Supabase storage upload error (using local fallback)", uploadError);
+      // Fallback: save locally
       const fs = require('fs');
       const path = await import("path");
       const uploadDir = path.join(process.cwd(), "public", "uploads", userId);
@@ -133,106 +153,93 @@ export async function POST(request: NextRequest) {
     logger.info("Storage", `File stored at: ${fileUrl}`);
   } catch (storageErr: any) {
     logger.error("Storage", "Storage exception", storageErr);
-    return NextResponse.json({ success: false, stage: "Storage", reason: storageErr.message, solution: "Check Supabase bucket permissions." }, { status: 500 });
+    return apiError("Storage Error", "Failed to save the uploaded resume", storageErr, 500);
   }
 
-  let parsedResume: any = null;
-
   // =================================================
-  // AI Service Integration & PDF Parsing
+  // Text Extraction & Initial DB Save
   // =================================================
+  let rawText = "";
+  let resumeRecord: any = null;
+  
   try {
-    const resolvedAiUrl = getResolvedAiServiceUrl();
-    
-    // Pre-flight check (Phase 5)
-    try {
-      logger.debug("Ollama Service", "Running pre-flight health check");
-      const healthCheck = await fetch(`${resolvedAiUrl}/health`, { signal: AbortSignal.timeout(5000) });
-      if (!healthCheck.ok) {
-        throw new Error("AI Service returned unhealthy status");
-      }
-      logger.info("Ollama Service", "Ollama is running and healthy");
-    } catch (healthErr: any) {
-      logger.error("Ollama Service", "Health check failed", healthErr);
-      return NextResponse.json({ success: false, stage: "Ollama Pre-flight", reason: "Ollama server is not running", solution: "Ensure smartintern-ai and smartintern-ollama containers are up." }, { status: 500 });
+    rawText = await extractTextFromFile(buffer, file.name);
+    if (!rawText || rawText.trim().length < 50) {
+      return apiError("Corrupted File", "Could not extract sufficient text from the file. It may be corrupted or image-based.", null, 422);
     }
 
-    logger.info("PDF Extraction", "PDF extraction started");
-    const aiFormData = new FormData();
-    aiFormData.append("file", new Blob([buffer], { type: file.type || "application/pdf" }), safeFileName);
-    aiFormData.append("user_id", userId);
-
-    logger.info("Ollama Service", "Sending prompt to Ollama (via AI Service)");
-    const parseResp = await fetch(`${resolvedAiUrl}/resume/parse`, {
-      method: "POST",
-      body: aiFormData,
-      signal: AbortSignal.timeout(240000), // 4 minutes
+    // Save initial record BEFORE AI processing. This guarantees the file is tracked
+    // even if the AI step fails due to rate limits or credits.
+    logger.debug("Database", "Saving initial resume record to database");
+    resumeRecord = await createResume({
+      user_id: userId,
+      file_url: fileUrl,
+      file_name: file.name,
+      raw_text: rawText,
+      extracted_skills: { technicalSkills: { programmingLanguages: [], frameworks: [], libraries: [], databases: { sql: [], nosql: [], orm: [] }, cloudPlatforms: [], devops: { containers: [], ciCd: [] }, backend: [], frontend: [], mobileDevelopment: [], machineLearningAndAI: [] } } as any,
+      ats_score: 0,
+      strengths: [],
+      weaknesses: [],
+      improvements: [],
     });
-
-    if (parseResp.ok) {
-      const data = await parseResp.json();
-      logger.info("PDF Extraction", "PDF extraction completed");
-      logger.info("Ollama Service", "Ollama responded");
-      
-      // JSON Validation (Phase 7 equivalent in JS)
-      if (!data.parsed || typeof data.parsed !== 'object') {
-        throw new Error("Invalid JSON structure returned by AI Service");
-      }
-      parsedResume = data.parsed;
-      logger.info("JSON Validation", "JSON validated");
-    } else {
-      const errText = await parseResp.text();
-      throw new Error(`AI Service returned ${parseResp.status}: ${errText}`);
-    }
-  } catch (aiErr: any) {
-    logger.error("Resume Parser", "AI parsing pipeline failed", aiErr);
-    return NextResponse.json({ success: false, stage: "Resume Parser / Ollama Client", reason: aiErr.message, solution: "Ensure ai-service docker container compiled correctly and PyMuPDF didn't crash." }, { status: 500 });
+    logger.info("Database", "Initial resume saved to database");
+  } catch (extractErr: any) {
+    logger.error("Text Extraction", "Failed to extract text or save initial record", extractErr);
+    return apiError("File Processing Error", "Failed to extract text from the file", extractErr, 500);
   }
 
   // =================================================
-  // Transform and Save to DB
+  // AI Parsing via Enterprise Engine
   // =================================================
+  let extractedSkills: any = resumeRecord.extracted_skills;
   let finalAtsScore = 0;
   let strengths: string[] = [];
   let weaknesses: string[] = [];
   let improvements: string[] = [];
   let breakdown: any = null;
-  let extractedSkills: any = {};
-  let resumeRecord: any = null;
+  let atsResult: any = null;
+  let aiFailed = false;
+  let aiErrorMessage = "";
 
   try {
-    logger.debug("Database", "Transforming parsed payload");
-    if (!parsedResume) throw new Error("Parsed resume is null");
+    logger.info("AI Service", "Parsing resume text via Enterprise LLM parser");
+    const { parseResumeEnterprise, generateATSReviewGrok } = await import("@/lib/openai");
+    const { calculateATSScore } = await import("@/lib/ats");
 
-    finalAtsScore = parsedResume.ats_score || 0;
-    strengths = parsedResume.strengths || [];
-    weaknesses = parsedResume.weaknesses || [];
-    improvements = parsedResume.missing_skills || [];
-    breakdown = { confidence: parsedResume.confidence_score };
+    const enterpriseData = await parseResumeEnterprise(rawText);
     
-    const pSkills = parsedResume.skills || {};
-    extractedSkills = {
-      technical: [...(pSkills.cloud || []), ...(pSkills.databases || [])],
-      programming: pSkills.programming_languages || [],
-      tools: [...(pSkills.tools || []), ...(pSkills.frameworks || [])],
-      certifications: parsedResume.certifications?.map((c: any) => c.name).filter(Boolean) || [],
-      projects: parsedResume.projects?.map((p: any) => p.title).filter(Boolean) || [],
-      education: parsedResume.education?.map((e: any) => e.degree).filter(Boolean) || [],
-      soft: pSkills.soft_skills || [],
-      allSkills: [
-        ...(pSkills.cloud || []), ...(pSkills.databases || []),
-        ...(pSkills.programming_languages || []),
-        ...(pSkills.tools || []), ...(pSkills.frameworks || []),
-        ...(pSkills.soft_skills || [])
-      ]
-    };
+    // Attempt Grok API for ATS Evaluation
+    try {
+      logger.info("AI Service", "Generating intelligent ATS Review via Grok API...");
+      atsResult = await generateATSReviewGrok(rawText, enterpriseData);
+      logger.info("AI Service", "Grok ATS Review succeeded");
+    } catch (grokErr: any) {
+      logger.warn("AI Service", "Grok ATS Review failed, falling back to heuristic engine", grokErr);
+      atsResult = calculateATSScore({ ...enterpriseData, rawText });
+    }
+
+    extractedSkills = enterpriseData;
+    finalAtsScore = atsResult.atsScore;
+    strengths = atsResult.strengths;
+    weaknesses = atsResult.weaknesses;
+    improvements = atsResult.improvements;
+    breakdown = atsResult.breakdown;
     
-    logger.debug("Database", "Executing INSERT into resumes table");
+    extractedSkills.allSkills = [
+      ...enterpriseData.technicalSkills.programmingLanguages,
+      ...enterpriseData.technicalSkills.frameworks,
+      ...enterpriseData.technicalSkills.libraries,
+      ...enterpriseData.technicalSkills.databases.sql,
+      ...enterpriseData.technicalSkills.databases.nosql,
+      ...enterpriseData.technicalSkills.cloudPlatforms,
+    ];
+
+    // Update DB with AI results
     resumeRecord = await createResume({
       user_id: userId,
       file_url: fileUrl,
       file_name: file.name,
-      raw_text: "Extracted securely via Enterprise ATS Pipeline",
+      raw_text: rawText,
       extracted_skills: extractedSkills,
       ats_score: finalAtsScore,
       strengths,
@@ -240,63 +247,66 @@ export async function POST(request: NextRequest) {
       improvements,
       breakdown,
     });
-    logger.info("Database", "Saved to database");
-  } catch (dbErr: any) {
-    logger.error("Database", "SQL Insert Failed", dbErr);
-    return NextResponse.json({ success: false, stage: "Database", reason: dbErr.message, solution: "Check Database schema constraints." }, { status: 500 });
+    logger.info("Database", "Resume updated with AI analysis");
+
+  } catch (err: any) {
+    logger.error("Resume AI Processing", "AI parsing failed, but file is saved", err);
+    aiFailed = true;
+    // Capture the real error reason for the frontend
+    const rawReason: string = err?.message || "Unknown AI error";
+    if (rawReason.includes("credits") || rawReason.includes("license") || rawReason.includes("403")) {
+      aiErrorMessage = "xAI API credits exhausted — the team has no active license. Please purchase credits at https://console.x.ai or try again with a funded API key.";
+    } else if (rawReason.includes("401") || rawReason.includes("Invalid xAI API Key") || rawReason.includes("unauthorized")) {
+      aiErrorMessage = "Invalid xAI API Key — check the XAI_API_KEY value in .env.local.";
+    } else if (rawReason.includes("429") || rawReason.includes("rate limit")) {
+      aiErrorMessage = "xAI API rate limit exceeded — please wait a moment and try again.";
+    } else if (rawReason.includes("timeout") || rawReason.includes("ECONNRESET") || rawReason.includes("ECONNREFUSED")) {
+      aiErrorMessage = "xAI API network timeout — check your internet connection.";
+    } else if (rawReason.includes("500") || rawReason.includes("502") || rawReason.includes("503")) {
+      aiErrorMessage = "xAI API returned a server error (5xx) — this is a temporary issue, please retry.";
+    } else {
+      aiErrorMessage = rawReason;
+    }
   }
 
   // =================================================
-  // Background Processing (Non-fatal)
+  // Background: Generate Recommendations (non-fatal)
   // =================================================
-  logger.debug("Background Tasks", "Triggering non-blocking pipelines");
   try {
-    const resolvedAiUrlForEmbed = getResolvedAiServiceUrl();
-    fetch(`${resolvedAiUrlForEmbed}/resume/embed`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        resume_id: resumeRecord.id,
-        user_id: userId,
-        text: "Extracted securely via Enterprise ATS Pipeline",
-        skills: extractedSkills.allSkills.slice(0, 50),
-        other_skills: [],
-        experience_summary: parsedResume?.experience?.slice(0, 2).map((e: any) => `${e.role || "Role"} at ${e.company || "Company"}`).join("; ") || "",
-        projects_summary: parsedResume?.projects?.slice(0, 3).map((p: any) => p.description || "").join("; ") || "",
-      }),
-      signal: AbortSignal.timeout(60000),
-    }).catch((e) => logger.warn("Background Tasks", "Embedding failed", e));
+    if (!aiFailed) {
+      const skills = resumeRecord.extracted_skills as any;
+      const allStudentSkills: string[] = [
+        ...(skills?.technical || []), ...(skills?.programming || []), ...(skills?.tools || [])
+      ].filter(Boolean);
 
-    const skills = resumeRecord.extracted_skills as any;
-    const allStudentSkills: string[] = [...(skills?.technical || []), ...(skills?.programming || []), ...(skills?.tools || [])].filter(Boolean);
+      const [assessment, { internships: activeInternships }] = await Promise.all([
+        getLatestAssessmentByUser(userId),
+        getActiveInternships({ limit: 500 }),
+      ]);
 
-    const [assessment, { internships: activeInternships }] = await Promise.all([
-      getLatestAssessmentByUser(userId), getActiveInternships({ limit: 500 }),
-    ]);
+      const normalizedInternships = activeInternships.map((i) => {
+        let reqSkills = i.required_skills as any;
+        if (typeof reqSkills === "string") {
+          try { reqSkills = JSON.parse(reqSkills); } catch { reqSkills = (reqSkills as string).split(",").map((s: string) => s.trim()); }
+        }
+        if (!Array.isArray(reqSkills)) reqSkills = [];
+        return { _id: i.id, requiredSkills: reqSkills };
+      });
 
-    const normalizedInternships = activeInternships.map((i) => {
-      let reqSkills = i.required_skills as any;
-      if (typeof reqSkills === "string") {
-        try { reqSkills = JSON.parse(reqSkills); } catch { reqSkills = (reqSkills as string).split(",").map((s: string) => s.trim()); }
-      }
-      if (!Array.isArray(reqSkills)) reqSkills = [];
-      return { _id: i.id, requiredSkills: reqSkills };
-    });
-
-    const rankings = rankInternships(normalizedInternships, allStudentSkills, resumeRecord.ats_score || 0, assessment?.percentage || 0);
-    await Promise.all(
-      rankings.map((rec) => upsertRecommendation({
-        user_id: userId, internship_id: rec.internshipId, match_percentage: rec.matchPercentage,
-        skill_score: rec.skillScore, assessment_score: rec.assessmentScore, matched_skills: rec.matchedSkills,
-      }))
-    );
-    logger.info("Background Tasks", "Ranking completed successfully");
+      const rankings = rankInternships(normalizedInternships, allStudentSkills, resumeRecord.ats_score || 0, assessment?.percentage || 0);
+      await Promise.all(
+        rankings.map((rec) => upsertRecommendation({
+          user_id: userId, internship_id: rec.internshipId, match_percentage: rec.matchPercentage,
+          skill_score: rec.skillScore, assessment_score: rec.assessmentScore, matched_skills: rec.matchedSkills,
+        }))
+      );
+      logger.info("Recommendations", "Recommendations generated");
+    }
   } catch (bgErr: any) {
-    logger.warn("Background Tasks", "Failed to generate recommendations", bgErr);
+    logger.warn("Recommendations", "Failed to generate recommendations (non-fatal)", bgErr);
   }
 
-  logger.info("Response", "Response returned");
-  return NextResponse.json({
+  const responsePayload: any = {
     success: true,
     resume: {
       id: resumeRecord.id,
@@ -308,15 +318,35 @@ export async function POST(request: NextRequest) {
       weaknesses: resumeRecord.weaknesses,
       improvements: resumeRecord.improvements,
       breakdown: (resumeRecord as any).breakdown || breakdown,
+      missingKeywords: (resumeRecord as any).missing_keywords || [],
+      missingSkills: (resumeRecord as any).missing_skills || [],
+      hiringProbability: (resumeRecord as any).hiring_probability || null,
+      recruiterImpression: (resumeRecord as any).recruiter_impression || null,
+      readabilityScore: (resumeRecord as any).readability_score || null,
+      professionalismScore: (resumeRecord as any).professionalism_score || null,
+      keywordDensity: (resumeRecord as any).keyword_density || null,
+      detectedDomain: (resumeRecord as any).detected_domain || null,
+      possibleRoles: (resumeRecord as any).possible_roles || [],
     },
-  });
+  };
+
+  if (aiFailed) {
+    responsePayload.message = `Resume uploaded successfully. AI analysis failed: ${aiErrorMessage}`;
+    responsePayload.aiAnalysisFailed = true;
+    responsePayload.aiErrorReason = aiErrorMessage;
+  } else if ((atsResult as any)?._heuristicFallback) {
+    responsePayload.message = "Resume uploaded and scored using the local heuristic engine (AI API was unavailable). The ATS score is an approximation.";
+    responsePayload.aiAnalysisFallback = true;
+  }
+
+  return NextResponse.json(responsePayload);
 }
 
 export async function GET(request: NextRequest) {
   try {
     const session = await auth();
     if (!session?.user) {
-      return NextResponse.json({ success: false, message: "Unauthorized", reason: "No session found", stack: "" }, { status: 401 });
+      return apiError("Unauthorized", "No active session found", "Please log in.", 401);
     }
 
     const userId = session.user.id as string;
@@ -334,13 +364,19 @@ export async function GET(request: NextRequest) {
         weaknesses: resume.weaknesses || [],
         improvements: resume.improvements || [],
         breakdown: (resume as any).breakdown || null,
+        missingKeywords: (resume as any).missing_keywords || [],
+        missingSkills: (resume as any).missing_skills || [],
+        hiringProbability: (resume as any).hiring_probability || null,
+        recruiterImpression: (resume as any).recruiter_impression || null,
+        readabilityScore: (resume as any).readability_score || null,
+        professionalismScore: (resume as any).professionalism_score || null,
+        keywordDensity: (resume as any).keyword_density || null,
+        detectedDomain: (resume as any).detected_domain || null,
+        possibleRoles: (resume as any).possible_roles || [],
       },
     });
   } catch (error: any) {
     console.error("Resume fetch error:", error);
-    return NextResponse.json(
-      { success: false, message: "Failed to fetch resume", reason: error.message, stack: error.stack },
-      { status: 500 }
-    );
+    return apiError("Resume fetch failed", "An unexpected error occurred while fetching the resume", error, 500);
   }
 }
