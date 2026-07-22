@@ -8,7 +8,11 @@ import { rankInternships } from "@/lib/recommendation";
 import { StructuredLogger } from "@/lib/logger";
 import mammoth from "mammoth";
 import { apiError } from "@/lib/api-response";
-
+import { getSupabase } from "@/lib/supabase";
+import { parseResumeEnterprise, generateATSReviewGrok } from "@/lib/openai";
+import { calculateATSScore } from "@/lib/ats";
+import path from "path";
+import fs from "fs";
 // ─────────────────────────────────────────────────────────────
 // Extract Text from Uploaded File (PDF / DOCX)
 // ─────────────────────────────────────────────────────────────
@@ -128,74 +132,56 @@ export async function POST(request: NextRequest) {
 
   let fileUrl = "";
   let safeFileName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_");
+  let rawText = "";
 
   // =================================================
-  // Storage Upload
+  // Parallel Storage Upload & Text Extraction
   // =================================================
   try {
-    logger.info("Storage", "Saving to Supabase storage");
-    const sb = (await import("@/lib/supabase")).getSupabase();
+    logger.info("Processing", "Starting storage upload and text extraction concurrently");
+    const sb = getSupabase();
     const filePath = `${userId}/${Date.now()}-${safeFileName}`;
 
-    const { data: uploadData, error: uploadError } = await sb.storage
-      .from("resumes")
-      .upload(filePath, buffer, { contentType: file.type || "application/pdf", upsert: true });
+    const [uploadResult, extractedTextResult] = await Promise.all([
+      // 1. Storage Upload Promise
+      (async () => {
+        const { error: uploadError } = await sb.storage
+          .from("resumes")
+          .upload(filePath, buffer, { contentType: file.type || "application/pdf", upsert: true });
 
-    if (uploadError) {
-      logger.warn("Storage", "Supabase storage upload error (using local fallback)", uploadError);
-      // Fallback: save locally
-      const fs = require('fs');
-      const path = await import("path");
-      const uploadDir = path.join(process.cwd(), "public", "uploads", userId);
-      fs.mkdirSync(uploadDir, { recursive: true });
-      fs.writeFileSync(path.join(uploadDir, safeFileName), buffer);
-      fileUrl = `/uploads/${userId}/${safeFileName}`;
-    } else {
-      const { data: urlData } = sb.storage.from("resumes").getPublicUrl(filePath);
-      fileUrl = urlData.publicUrl;
-    }
-    logger.info("Storage", `File stored at: ${fileUrl}`);
-  } catch (storageErr: any) {
-    logger.error("Storage", "Storage exception", storageErr);
-    return apiError("Storage Error", "Failed to save the uploaded resume", storageErr, 500);
-  }
+        if (uploadError) {
+          logger.warn("Storage", "Supabase storage upload error (using local fallback)", uploadError);
+          const uploadDir = path.join(process.cwd(), "public", "uploads", userId);
+          fs.mkdirSync(uploadDir, { recursive: true });
+          fs.writeFileSync(path.join(uploadDir, safeFileName), buffer);
+          return `/uploads/${userId}/${safeFileName}`;
+        } else {
+          const { data: urlData } = sb.storage.from("resumes").getPublicUrl(filePath);
+          return urlData.publicUrl;
+        }
+      })(),
+      // 2. Text Extraction Promise
+      extractTextFromFile(buffer, file.name)
+    ]);
 
-  // =================================================
-  // Text Extraction & Initial DB Save
-  // =================================================
-  let rawText = "";
-  let resumeRecord: any = null;
-  
-  try {
-    rawText = await extractTextFromFile(buffer, file.name);
+    fileUrl = uploadResult;
+    rawText = extractedTextResult;
+    
     if (!rawText || rawText.trim().length < 50) {
       return apiError("Corrupted File", "Could not extract sufficient text from the file. It may be corrupted or image-based.", null, 422);
     }
-
-    // Save initial record BEFORE AI processing. This guarantees the file is tracked
-    // even if the AI step fails due to rate limits or credits.
-    logger.debug("Database", "Saving initial resume record to database");
-    resumeRecord = await createResume({
-      user_id: userId,
-      file_url: fileUrl,
-      file_name: file.name,
-      raw_text: rawText,
-      extracted_skills: { technicalSkills: { programmingLanguages: [], frameworks: [], libraries: [], databases: { sql: [], nosql: [], orm: [] }, cloudPlatforms: [], devops: { containers: [], ciCd: [] }, backend: [], frontend: [], mobileDevelopment: [], machineLearningAndAI: [] } } as any,
-      ats_score: 0,
-      strengths: [],
-      weaknesses: [],
-      improvements: [],
-    });
-    logger.info("Database", "Initial resume saved to database");
-  } catch (extractErr: any) {
-    logger.error("Text Extraction", "Failed to extract text or save initial record", extractErr);
-    return apiError("File Processing Error", "Failed to extract text from the file", extractErr, 500);
+    
+    logger.info("Processing", `File stored at: ${fileUrl} and text extracted`);
+  } catch (err: any) {
+    logger.error("Processing", "Storage or Text Extraction failed", err);
+    return apiError("File Processing Error", "Failed to process the uploaded file (storage or extraction)", err, 500);
   }
 
   // =================================================
   // AI Parsing via Enterprise Engine
   // =================================================
-  let extractedSkills: any = resumeRecord.extracted_skills;
+  let extractedSkills: any = { technicalSkills: { programmingLanguages: [], frameworks: [], libraries: [], databases: { sql: [], nosql: [], orm: [] }, cloudPlatforms: [], devops: { containers: [], ciCd: [] }, backend: [], frontend: [], mobileDevelopment: [], machineLearningAndAI: [] } };
+  let resumeRecord: any = null;
   let finalAtsScore = 0;
   let strengths: string[] = [];
   let weaknesses: string[] = [];
@@ -207,8 +193,6 @@ export async function POST(request: NextRequest) {
 
   try {
     logger.info("AI Service", "Parsing resume text via Enterprise LLM parser");
-    const { parseResumeEnterprise, generateATSReviewGrok } = await import("@/lib/openai");
-    const { calculateATSScore } = await import("@/lib/ats");
 
     const enterpriseData = await parseResumeEnterprise(rawText);
     
@@ -251,11 +235,25 @@ export async function POST(request: NextRequest) {
       improvements,
       breakdown,
     });
-    logger.info("Database", "Resume updated with AI analysis");
+    logger.info("Database", "Resume saved with AI analysis");
 
   } catch (err: any) {
-    logger.error("Resume AI Processing", "AI parsing failed, but file is saved", err);
+    logger.error("Resume AI Processing", "AI parsing failed, falling back to basic save", err);
     aiFailed = true;
+
+    // Save fallback record so the file is still tracked
+    resumeRecord = await createResume({
+      user_id: userId,
+      file_url: fileUrl,
+      file_name: file.name,
+      raw_text: rawText,
+      extracted_skills: extractedSkills,
+      ats_score: 0,
+      strengths: [],
+      weaknesses: [],
+      improvements: [],
+    });
+
     // Capture the real error reason for the frontend
     const rawReason: string = err?.message || "Unknown AI error";
     if (rawReason.includes("credits") || rawReason.includes("license") || rawReason.includes("403")) {
