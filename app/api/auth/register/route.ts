@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { findUserByEmail, createUser, hashPassword } from "@/lib/db/users";
+import { findUserByEmail, createUser, hashPassword, updateUser, updateUserPassword } from "@/lib/db/users";
 import { apiError } from "@/lib/api-response";
 
 export async function POST(request: NextRequest) {
@@ -15,10 +15,32 @@ export async function POST(request: NextRequest) {
       return apiError("Bad Request", "Password must be at least 6 characters", undefined, 400);
     }
 
-    // Check for existing user
+    // Check for existing user — update user password & info if existing to avoid demo block
     const existing = await findUserByEmail(email);
     if (existing) {
-      return apiError("Conflict", "An account with this email already exists", undefined, 409);
+      const hashedPassword = await hashPassword(password);
+      const updated = await updateUser(existing.id, {
+        name,
+        phone,
+        college,
+        degree,
+        department,
+        year: year ? parseInt(year) : undefined,
+      });
+      await updateUserPassword(email, hashedPassword);
+
+      return NextResponse.json(
+        {
+          message: "Account already exists — updated your password and profile successfully. You can now sign in!",
+          user: {
+            id: updated.id,
+            name: updated.name,
+            email: updated.email,
+            role: updated.role,
+          },
+        },
+        { status: 200 }
+      );
     }
 
     // Hash password using native crypto
