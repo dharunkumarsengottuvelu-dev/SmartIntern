@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import { findUserById, updateUser } from "@/lib/db/users";
+import { ensureUserExists, updateUser } from "@/lib/db/users";
 import { getResumeByUser } from "@/lib/db/resumes";
 import { apiError } from "@/lib/api-response";
 
@@ -12,16 +12,8 @@ export async function GET(request: NextRequest) {
     }
 
     const userId = session.user.id as string;
-    // Basic UUID validation
-    const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-    if (!uuidRegex.test(userId)) {
-      return apiError("Invalid Session", "Session contains an invalid user identifier", "Expected a valid UUID but received an invalid string format. Please log out and log in again.", 400);
-    }
 
-    const user = await findUserById(userId);
-    if (!user) {
-      return apiError("User not found", "The requested user profile does not exist", "Your session may be stale or the account was deleted. Please log in again.", 404);
-    }
+    const user = await ensureUserExists(userId, session.user.email || undefined, session.user.name || undefined);
 
     const resume = await getResumeByUser(session.user.id as string);
     let skills: string[] = [];

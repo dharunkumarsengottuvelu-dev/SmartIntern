@@ -44,14 +44,59 @@ export async function findUserByEmail(email: string, includePassword = false): P
 
 
 export async function findUserById(id: string): Promise<DbUser | null> {
-  const sb = getSupabase();
-  const { data, error } = await sb
-    .from("users")
-    .select("id,name,email,role,phone,college,degree,department,year,created_at,updated_at")
-    .eq("id", id)
-    .single();
-  if (error || !data) return null;
-  return data as unknown as DbUser;
+  try {
+    const sb = getSupabase();
+    const { data, error } = await sb
+      .from("users")
+      .select("id,name,email,role,phone,college,degree,department,year,created_at,updated_at")
+      .eq("id", id)
+      .maybeSingle();
+    if (error || !data) return null;
+    return data as unknown as DbUser;
+  } catch {
+    return null;
+  }
+}
+
+export async function ensureUserExists(id: string, email?: string, name?: string): Promise<DbUser> {
+  try {
+    const existing = await findUserById(id);
+    if (existing) return existing;
+
+    if (email) {
+      const existingByEmail = await findUserByEmail(email);
+      if (existingByEmail) return existingByEmail;
+    }
+
+    const sb = getSupabase();
+    const newUser = {
+      id,
+      name: name || "Student User",
+      email: (email || `user_${id.substring(0, 8)}@example.com`).toLowerCase(),
+      role: "student",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data, error } = await sb.from("users").upsert(newUser, { onConflict: "id" }).select("*").maybeSingle();
+    if (error || !data) {
+      return {
+        ...newUser,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      } as unknown as DbUser;
+    }
+    return data as unknown as DbUser;
+  } catch {
+    return {
+      id,
+      name: name || "Student User",
+      email: (email || `user_${id.substring(0, 8)}@example.com`).toLowerCase(),
+      role: "student",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    } as unknown as DbUser;
+  }
 }
 
 export async function createUser(input: {

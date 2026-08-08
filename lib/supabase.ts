@@ -35,14 +35,12 @@ export function getSupabase(): SupabaseClient {
   // (http://127.0.0.1:54321 after `supabase start`), NOT at *.supabase.co.
   // Any *.supabase.co URL here is an internet dependency that breaks offline mode.
   const rawUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
 
   if (!rawUrl || !key) {
     throw new Error(
-      "Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.\n" +
-      "For offline operation, these must point at your local Supabase CLI instance.\n" +
-      "Run `supabase start` and use the URL/key it prints.\n" +
-      "Add them to .env.local — do NOT use a hosted *.supabase.co project."
+      "Missing NEXT_PUBLIC_SUPABASE_URL or Supabase API key.\n" +
+      "Add them to .env.local or your deployment environment variables."
     );
   }
 
