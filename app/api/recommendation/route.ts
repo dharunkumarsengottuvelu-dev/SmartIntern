@@ -46,9 +46,9 @@ async function generateAndGetRecommendations(userId: string) {
   // Rank all active internships for this student
   const rankings = rankInternships(normalizedInternships, allStudentSkills, atsScore, assessmentScore);
 
-  // Upsert each recommendation
+  // Upsert top 50 recommendations in parallel
   await Promise.all(
-    rankings.map((rec) =>
+    rankings.slice(0, 50).map((rec) =>
       upsertRecommendation({
         user_id: userId,
         internship_id: rec.internshipId,

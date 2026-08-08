@@ -57,50 +57,55 @@ export async function POST(request: NextRequest) {
       completed_at: new Date().toISOString(),
     });
 
-    // Trigger recommendation generation (non-fatal)
-    try {
-      const resume = await getResumeById(assessment.resume_id, userId);
-      if (resume) {
-        const skills = resume.extracted_skills as any;
-        const allStudentSkills = [
-          ...(skills.technical || []),
-          ...(skills.programming || []),
-          ...(skills.tools || []),
-        ].filter(Boolean);
+    // Trigger recommendation generation asynchronously in background (non-blocking)
+    (async () => {
+      try {
+        const resume = await getResumeById(assessment.resume_id, userId);
+        if (resume) {
+          const skills = (resume.extracted_skills || {}) as any;
+          const allStudentSkills = [
+            ...(skills.technical || []),
+            ...(skills.programming || []),
+            ...(skills.tools || []),
+          ].filter(Boolean);
 
-        const { internships } = await getActiveInternships({ limit: 1000 });
-        const rankings = rankInternships(
-          internships.map((i) => {
-            let reqSkills = i.required_skills;
-            if (typeof reqSkills === "string") {
-              try {
-                reqSkills = JSON.parse(reqSkills);
-              } catch {
-                reqSkills = (reqSkills as unknown as string).split(",").map(s => s.trim());
+          const { internships } = await getActiveInternships({ limit: 200 });
+          const rankings = rankInternships(
+            internships.map((i) => {
+              let reqSkills = i.required_skills;
+              if (typeof reqSkills === "string") {
+                try {
+                  reqSkills = JSON.parse(reqSkills);
+                } catch {
+                  reqSkills = (reqSkills as unknown as string).split(",").map(s => s.trim());
+                }
               }
-            }
-            if (!Array.isArray(reqSkills)) reqSkills = [];
-            return { _id: i.id, requiredSkills: reqSkills };
-          }),
-          allStudentSkills,
-          resume.ats_score || 0,
-          percentage
-        );
+              if (!Array.isArray(reqSkills)) reqSkills = [];
+              return { _id: i.id, requiredSkills: reqSkills };
+            }),
+            allStudentSkills,
+            resume.ats_score || 0,
+            percentage
+          );
 
-        for (const rec of rankings) {
-          await upsertRecommendation({
-            user_id: userId,
-            internship_id: rec.internshipId,
-            match_percentage: rec.matchPercentage,
-            skill_score: rec.skillScore,
-            assessment_score: rec.assessmentScore,
-            matched_skills: rec.matchedSkills,
-          });
+          // Update top recommendations in parallel
+          await Promise.all(
+            rankings.slice(0, 50).map((rec) =>
+              upsertRecommendation({
+                user_id: userId,
+                internship_id: rec.internshipId,
+                match_percentage: rec.matchPercentage,
+                skill_score: rec.skillScore,
+                assessment_score: rec.assessmentScore,
+                matched_skills: rec.matchedSkills,
+              })
+            )
+          );
         }
+      } catch (recError) {
+        console.error("Background recommendation generation error:", recError);
       }
-    } catch (recError) {
-      console.error("Recommendation generation error (non-fatal):", recError);
-    }
+    })();
 
     // Build a map of questionIndex -> correct answer for the review screen
     const correctAnswerMap: Record<number, string> = {};
